@@ -1,6 +1,8 @@
 extends CharacterBody3D
 ## 遥控机器人：操作始终相对自身（W/S 前进后退，A/D 原地转向，约 45°/秒）。
-## 机身在渲染层 2，机载摄像头不渲染这一层（机载画面看不到机器人自己）。
+## 机身在渲染层 2，机载照片不渲染这一层（照片里看不到机器人自己）。
+## 机载相机不能实时回传：这里只有相机挂点和闪光，拍照由操作台用单独的 SubViewport 渲染一帧。
+## 声呐：一次 ping 向前方 120° 扇形发出一排水平射线，回声点（角度、距离、强度）交给操作台的扇形屏。
 
 const FORWARD_SPEED := 1.1
 const BACK_SPEED := 0.6
@@ -9,13 +11,24 @@ const ACCEL := 3.0
 const TURN_ACCEL := 4.0
 const BODY_LAYER := 2
 const MONITOR_ONLY_LAYER := 4  # 渲染层 3：只有监控看得到的东西（帧间者）
+const PHOTO_CULL := 0xFFFFF & ~BODY_LAYER & ~MONITOR_ONLY_LAYER
+
+const SONAR_RANGE := 7.0
+const SONAR_HALF_ARC := PI / 3.0  # 前方 120°
+const SONAR_RAYS := 121  # 每 1° 一条
+const SONAR_HEIGHT := 0.3
+const SONAR_DROPOUT := 0.08  # 少量射线没有回声，轮廓更像声呐
+
+signal sonar_returned(echoes: PackedVector3Array)
 
 var speed := 0.0
 var turn_rate := 0.0
 var input_enabled := true
 var odometer := 0.0
-var onboard_cam: Camera3D
-var headlight: SpotLight3D
+var camera_mount: Node3D
+var flash: SpotLight3D
+var _sonar_pending := false
+var _rng := RandomNumberGenerator.new()
 
 
 func _init() -> void:
@@ -41,8 +54,27 @@ func motion_level() -> float:
 	return clampf(absf(speed) / FORWARD_SPEED + absf(turn_rate) / TURN_SPEED * 0.6, 0.0, 1.0)
 
 
-func toggle_headlight() -> void:
-	headlight.visible = not headlight.visible
+## 拍照用的相机：由操作台放进自己的 SubViewport，拍照时对齐到 camera_mount
+static func build_photo_camera() -> Camera3D:
+	var cam := Camera3D.new()
+	cam.fov = 60.0
+	cam.keep_aspect = Camera3D.KEEP_WIDTH
+	cam.near = 0.04
+	cam.far = 40.0
+	cam.cull_mask = PHOTO_CULL
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color.BLACK
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color.BLACK
+	env.ambient_light_energy = 0.0
+	cam.environment = env
+	return cam
+
+
+## 下一个物理帧发一次 ping，结果从 sonar_returned 发出
+func ping_sonar() -> void:
+	_sonar_pending = true
 
 
 func _physics_process(delta: float) -> void:
@@ -64,6 +96,30 @@ func _physics_process(delta: float) -> void:
 	# 顶到东西：速度掉下来，下次松开再加速
 	if get_slide_collision_count() > 0 and moved < absf(speed) * delta * 0.5:
 		speed = move_toward(speed, 0.0, ACCEL * 2.0 * delta)
+	if _sonar_pending:
+		_sonar_pending = false
+		sonar_returned.emit(_sonar_scan())
+
+
+## 每个回声：x = 相对正前方的角度（右为正，弧度），y = 距离（米），z = 强度（正对表面强，擦过弱）
+func _sonar_scan() -> PackedVector3Array:
+	var space := get_world_3d().direct_space_state
+	var origin := global_position + Vector3.UP * SONAR_HEIGHT
+	var fwd := forward()
+	var right := global_transform.basis.x
+	var out := PackedVector3Array()
+	for i in SONAR_RAYS:
+		var a := lerpf(-SONAR_HALF_ARC, SONAR_HALF_ARC, float(i) / float(SONAR_RAYS - 1))
+		var dir := fwd * cos(a) + right * sin(a)
+		var query := PhysicsRayQueryParameters3D.create(origin, origin + dir * SONAR_RANGE, 1)
+		var hit := space.intersect_ray(query)
+		if hit.is_empty() or _rng.randf() < SONAR_DROPOUT:
+			continue
+		var pos: Vector3 = hit["position"]
+		var normal: Vector3 = hit["normal"]
+		var dist := origin.distance_to(pos) + _rng.randf_range(-0.04, 0.04)
+		out.append(Vector3(a, dist, 0.45 + 0.55 * absf(normal.dot(dir))))
+	return out
 
 
 func _build_body() -> void:
@@ -84,34 +140,23 @@ func _build_body() -> void:
 
 
 func _build_onboard() -> void:
-	onboard_cam = Camera3D.new()
-	onboard_cam.fov = 60.0
-	onboard_cam.keep_aspect = Camera3D.KEEP_WIDTH
-	onboard_cam.near = 0.04
-	onboard_cam.far = 40.0
-	onboard_cam.position = Vector3(0.0, 0.45, -0.38)
-	onboard_cam.rotation_degrees = Vector3(-12.0, 0.0, 0.0)
-	onboard_cam.cull_mask = 0xFFFFF & ~BODY_LAYER & ~MONITOR_ONLY_LAYER
-	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color.BLACK
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color.BLACK
-	env.ambient_light_energy = 0.0
-	onboard_cam.environment = env
-	add_child(onboard_cam)
+	camera_mount = Node3D.new()
+	camera_mount.position = Vector3(0.0, 0.45, -0.38)
+	camera_mount.rotation_degrees = Vector3(-12.0, 0.0, 0.0)
+	add_child(camera_mount)
 
-	# 头灯：只照亮前方 3～4 米
-	headlight = SpotLight3D.new()
-	headlight.position = Vector3(0.0, 0.40, -0.36)
-	headlight.rotation_degrees = Vector3(-10.0, 0.0, 0.0)
-	headlight.spot_range = 4.6
-	headlight.spot_angle = 34.0
-	headlight.spot_attenuation = 0.8
-	headlight.light_energy = 1.35
-	headlight.light_color = Color(1.0, 0.92, 0.78)
-	headlight.shadow_enabled = true
-	add_child(headlight)
+	# 闪光：只在拍照那一帧亮，照亮前方 3～4 米
+	flash = SpotLight3D.new()
+	flash.position = Vector3(0.0, 0.40, -0.36)
+	flash.rotation_degrees = Vector3(-10.0, 0.0, 0.0)
+	flash.spot_range = 4.6
+	flash.spot_angle = 34.0
+	flash.spot_attenuation = 0.8
+	flash.light_energy = 1.35
+	flash.light_color = Color(1.0, 0.94, 0.84)
+	flash.shadow_enabled = true
+	flash.visible = false
+	add_child(flash)
 
 
 func _mat(color: Color) -> StandardMaterial3D:

@@ -1,6 +1,7 @@
 shader_type canvas_item;
 // 操作台显示器：桶形畸变、扫描线、噪点、切换雪花。
-// mono = 0 机载（有颜色，偏暗去饱和）；mono = 1 监控（红外单色）。
+// mono = 0 机载照片（有颜色，偏暗去饱和）；mono = 1 监控（红外单色）。
+// reveal < 1：照片正在逐行传回，已传到的行显示新照片，其余还是上一张（prev_tex，压暗）。
 
 uniform float mono : hint_range(0.0, 1.0) = 0.0;
 uniform float desaturate : hint_range(0.0, 1.0) = 0.45;
@@ -11,6 +12,8 @@ uniform float scanline_strength : hint_range(0.0, 1.0) = 0.22;
 uniform float scan_lines = 360.0;
 uniform float brightness = 1.0;
 uniform vec3 ir_tint = vec3(0.86, 1.0, 0.9);
+uniform float reveal : hint_range(0.0, 1.0) = 1.0;
+uniform sampler2D prev_tex : hint_default_black, filter_linear;
 
 float hash(vec2 p) {
 	p = fract(p * vec2(123.34, 456.21));
@@ -33,6 +36,14 @@ void fragment() {
 		float line = floor(uv.y * scan_lines);
 		uv.x += (hash(vec2(line, frame)) - 0.5) * 0.03 * static_amount;
 		vec3 col = texture(TEXTURE, uv).rgb;
+		if (reveal < 1.0) {
+			float row = floor(uv.y * scan_lines) / scan_lines;
+			if (row >= reveal) {
+				col = texture(prev_tex, uv).rgb * 0.5;
+			} else if (row > reveal - 3.0 / scan_lines) {
+				col = col * 1.5 + vec3(0.06);  // 正在写入的几行更亮
+			}
+		}
 		float lum = dot(col, vec3(0.299, 0.587, 0.114));
 		vec3 onboard = mix(col, vec3(lum), desaturate);
 		vec3 ir = vec3(lum) * ir_tint;

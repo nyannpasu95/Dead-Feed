@@ -14,6 +14,11 @@ static func build_all() -> Dictionary:
 		"beep": beep(),
 		"buzz": buzz(),
 		"door": door(),
+		"shutter": shutter(),
+		"charge": flash_charge(),
+		"transmit": transmit(),
+		"ping": sonar_ping(),
+		"echo": sonar_echo(),
 	}
 
 
@@ -136,4 +141,84 @@ static func door() -> AudioStreamWAV:
 			var dt := t - 2.05
 			v += (sin(TAU * 85.0 * dt) * 0.6 + rng.randf_range(-1.0, 1.0) * 0.3) * exp(-dt * 18.0)
 		s[i] = v
+	return _wav(s)
+
+
+## 快门：两下机械咔哒 + 闪光放电时一声往下滑的细响
+static func shutter() -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 13
+	var s := _buffer(0.3)
+	var phase := 0.0
+	for i in s.size():
+		var t := float(i) / RATE
+		var v := 0.0
+		for hit in [[0.0, 0.9], [0.055, 0.65]]:
+			var dt: float = t - float(hit[0])
+			if dt >= 0.0:
+				v += float(hit[1]) * rng.randf_range(-1.0, 1.0) * exp(-dt * 900.0)
+				v += float(hit[1]) * sin(TAU * 3200.0 * dt) * exp(-dt * 400.0) * 0.4
+		phase += TAU * (1200.0 + 3800.0 * exp(-t * 25.0)) / RATE
+		v += sin(phase) * 0.12 * exp(-t * 14.0)
+		s[i] = v * 0.8
+	return _wav(s)
+
+
+## 闪光充电：细细的、越来越高的啸叫，充满时停
+static func flash_charge() -> AudioStreamWAV:
+	var length := 4.4
+	var s := _buffer(length)
+	var phase := 0.0
+	for i in s.size():
+		var t := float(i) / RATE
+		var k := t / length
+		phase += TAU * (1800.0 + 5200.0 * (1.0 - pow(1.0 - k, 2.0))) / RATE
+		var env := minf(1.0, t / 0.3) * clampf((length - t) / 0.4, 0.0, 1.0) * (0.6 + 0.4 * k)
+		s[i] = sin(phase) * 0.06 * env
+	return _wav(s)
+
+
+## 照片传回：每行开头一个同步音，后面是快速跳变的数据音（约 1 秒）
+static func transmit() -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 17
+	var length := 1.0
+	var s := _buffer(length)
+	var phase := 0.0
+	var f := 1500.0
+	var next_switch := 0.0
+	for i in s.size():
+		var t := float(i) / RATE
+		if fmod(t, 1.0 / 30.0) < 0.005:
+			f = 1200.0
+		elif t >= next_switch:
+			f = rng.randf_range(1500.0, 2300.0)
+			next_switch = t + rng.randf_range(0.006, 0.018)
+		phase += TAU * f / RATE
+		var env := minf(1.0, t / 0.02) * clampf((length - t) / 0.03, 0.0, 1.0)
+		s[i] = sin(phase) * 0.2 * env
+	return _wav(s)
+
+
+## 声呐 ping：清脆的一声，尾音略往下沉
+static func sonar_ping() -> AudioStreamWAV:
+	var s := _buffer(0.9)
+	var phase := 0.0
+	for i in s.size():
+		var t := float(i) / RATE
+		phase += TAU * (1150.0 - 60.0 * t) / RATE
+		var env := minf(1.0, t / 0.004) * exp(-t * 7.0)
+		s[i] = (sin(phase) * 0.45 + sin(phase * 2.0) * 0.06) * env
+	return _wav(s)
+
+
+## 回声：更软、更短，有一点颤
+static func sonar_echo() -> AudioStreamWAV:
+	var s := _buffer(0.5)
+	var phase := 0.0
+	for i in s.size():
+		var t := float(i) / RATE
+		phase += TAU * 1080.0 / RATE
+		var env := minf(1.0, t / 0.02) * exp(-t * 11.0)
+		s[i] = sin(phase) * 0.3 * env * (0.85 + 0.15 * sin(TAU * 31.0 * t))
 	return _wav(s)
