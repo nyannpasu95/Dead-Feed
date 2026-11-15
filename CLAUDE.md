@@ -79,3 +79,24 @@ GitHub Game Off 2026 参赛作品，主题 **SHIFT**。独立开发，AI 辅助�
 ## 当前重点
 
 **先把第 1 关做好**，它就是第一周原型的目标：机器人移动、机载 / 监控切换、CRT 画面、货箱迷宫、警卫室纸张谜题。第 3 关和听声者暂缓。
+
+## 代码结构与运行
+
+Godot 4.7.2（`/Applications/Godot.app`）。整关由代码从数据搭出来，没有手摆的场景。
+
+| 文件 | 作用 |
+| --- | --- |
+| `levels/level_01.gd` | 第 1 关数据：房间、墙段、货箱迷宫（字符网格）、摄像头、门、道具、触发器 |
+| `scripts/level_builder.gd` | 把关卡数据搭成 CSG 灰盒；`"scene"` 道具类型用来放资产工作台做的模型 |
+| `scripts/main.gd` | 操作台：视角切换、监控低帧率、平面图、按键图标、密码面板、声音、自动截图 |
+| `scripts/robot.gd` | 机器人、机载摄像头、头灯 |
+| `scripts/feed_overlay.gd` | 监控画面里的编号、时间戳、朝向箭头（画进 SubViewport，跟画面一起过 CRT） |
+| `scripts/floor_plan.gd` | 残缺平面图，点摄像头切换 |
+| `scripts/sfx.gd` | 程序合成的占位音效 |
+| `shaders/crt.gdshader` | CRT 后处理；`mono` 切换机载彩色 / 监控红外 |
+
+- 运行：`/Applications/Godot.app/Contents/MacOS/Godot --path .`
+- 自动截图检查（改了画面或关卡后跑一次，逐张看图）：
+  `/Applications/Godot.app/Contents/MacOS/Godot --path . --quit-after 7000 -- --autotest=<输出目录>`
+- GDScript 注意：从字典 / 数组取出的值是 Variant，不能用 `:=` 推断类型，要写明类型
+- 拖痕和地面的 Rec.601 亮度必须相同（单色监控里看不出），改地面颜色时一起改
