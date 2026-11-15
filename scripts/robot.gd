@@ -8,6 +8,7 @@ const TURN_SPEED := 0.785398  # 45°/秒
 const ACCEL := 3.0
 const TURN_ACCEL := 4.0
 const BODY_LAYER := 2
+const MONITOR_ONLY_LAYER := 4  # 渲染层 3：只有监控看得到的东西（帧间者）
 
 var speed := 0.0
 var turn_rate := 0.0
@@ -90,7 +91,7 @@ func _build_onboard() -> void:
 	onboard_cam.far = 40.0
 	onboard_cam.position = Vector3(0.0, 0.45, -0.38)
 	onboard_cam.rotation_degrees = Vector3(-12.0, 0.0, 0.0)
-	onboard_cam.cull_mask = 0xFFFFF & ~BODY_LAYER
+	onboard_cam.cull_mask = 0xFFFFF & ~BODY_LAYER & ~MONITOR_ONLY_LAYER
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = Color.BLACK

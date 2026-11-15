@@ -3,7 +3,10 @@ extends RefCounted
 ## 墙、货箱、家具用 CSGBox3D（带碰撞）；贴地的条纹、纸、拖痕用 MeshInstance3D。
 ## 以后用资产工作台做出的模型，用 "scene" 类型的道具放进来即可。
 
+const FrameSkipper := preload("res://scripts/frame_skipper.gd")
+
 const WALL_T := 0.2
+const CEILING_LAYER := 8  # 渲染层 4：天花板（俯视检查图不渲染）
 const DECAL_Y := 0.006
 
 static var _monitor_env: Environment
@@ -15,6 +18,7 @@ static func build(data: Dictionary, root: Node3D) -> Dictionary:
 		"doors": {},
 		"triggers": {},
 		"blinkers": [],
+		"skippers": [],
 	}
 	var m := _materials()
 	var wall_h: float = data["wall_height"]
@@ -22,7 +26,8 @@ static func build(data: Dictionary, root: Node3D) -> Dictionary:
 	var fr: Rect2 = data["floor"]
 	_box(root, Vector3(fr.get_center().x, -0.1, fr.get_center().y), Vector3(fr.size.x, 0.2, fr.size.y), m["floor"], true)
 	# 天花板：监控仰角高时不会看到墙顶外的黑洞
-	_box(root, Vector3(fr.get_center().x, wall_h + 0.1, fr.get_center().y), Vector3(fr.size.x, 0.2, fr.size.y), m["wall"], false)
+	var ceiling := _box(root, Vector3(fr.get_center().x, wall_h + 0.1, fr.get_center().y), Vector3(fr.size.x, 0.2, fr.size.y), m["wall"], false)
+	ceiling.layers = CEILING_LAYER
 	for w in data["walls"]:
 		_wall(root, w, wall_h, m["wall"])
 	_crates(root, data["crates"], m)
@@ -34,6 +39,11 @@ static func build(data: Dictionary, root: Node3D) -> Dictionary:
 		out["doors"][d["id"]] = _door(root, d, wall_h, m)
 	for t in data["triggers"]:
 		out["triggers"][t["id"]] = _area(root, t["rect"], 1.2)
+	for f in data.get("frame_skippers", []):
+		var skipper := FrameSkipper.new()
+		root.add_child(skipper)
+		skipper.setup(f)
+		out["skippers"].append(skipper)
 	return out
 
 
@@ -246,6 +256,8 @@ static func _prop(root: Node3D, p: Dictionary, m: Dictionary, out: Dictionary) -
 			_chair_fallen(root, p, m)
 		"console":
 			_console(root, p, m, out)
+		"lamp_fallen":
+			_lamp_fallen(root, p, m, out)
 		"drag_mark":
 			_drag_mark(root, p, m)
 		"elevator":
@@ -316,6 +328,33 @@ static func _console(root: Node3D, p: Dictionary, m: Dictionary, out: Dictionary
 		var dot := _flat(panel, Vector3(x, 0.08, 0.053), Vector3(0.05, 0.035, 0.006), m[colors[i]])
 		if i % 3 != 1:
 			out["blinkers"].append({"node": dot, "period": 0.9 + i * 0.37, "duty": 0.55, "phase": i * 0.61})
+
+
+## 倒在地上的台灯：灯光从门口照进走廊，在对面墙上投出一块光斑，偶尔闪一下。
+## 走廊没有摄像头，机载靠这块光知道这里有个门。
+static func _lamp_fallen(root: Node3D, p: Dictionary, m: Dictionary, out: Dictionary) -> void:
+	var pos: Vector2 = p["pos"]
+	var node := Node3D.new()
+	node.position = Vector3(pos.x, 0.0, pos.y)
+	node.rotation.y = deg_to_rad(-float(p.get("yaw", 0.0)))
+	root.add_child(node)
+	# 底座在后，灯杆横躺，灯罩朝前（本地 -z）
+	_flat(node, Vector3(0.0, 0.03, 0.32), Vector3(0.18, 0.05, 0.18), m["metal"])
+	_flat(node, Vector3(0.0, 0.04, 0.12), Vector3(0.025, 0.025, 0.4), m["metal"])
+	_flat(node, Vector3(0.0, 0.09, -0.1), Vector3(0.16, 0.14, 0.14), m["metal_light"])
+	var lit := Node3D.new()
+	node.add_child(lit)
+	_flat(lit, Vector3(0.0, 0.09, -0.175), Vector3(0.1, 0.09, 0.01), m["glow_pale"])
+	var spot := SpotLight3D.new()
+	spot.position = Vector3(0.0, 0.12, -0.2)
+	spot.rotation_degrees = Vector3(12.0, 0.0, 0.0)  # 略向上，光斑落在走廊对面墙上
+	spot.spot_range = 5.5
+	spot.spot_angle = 22.0
+	spot.spot_attenuation = 0.9
+	spot.light_energy = 2.4
+	spot.light_color = Color(1.0, 0.82, 0.58)
+	lit.add_child(spot)
+	out["blinkers"].append({"node": lit, "period": 3.1, "duty": 0.92, "phase": 0.4})
 
 
 static func _drag_mark(root: Node3D, p: Dictionary, m: Dictionary) -> void:

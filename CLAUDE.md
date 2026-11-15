@@ -90,6 +90,7 @@ Godot 4.7.2（`/Applications/Godot.app`）。整关由代码从数据搭出来�
 | `scripts/level_builder.gd` | 把关卡数据搭成 CSG 灰盒；`"scene"` 道具类型用来放资产工作台做的模型 |
 | `scripts/main.gd` | 操作台：视角切换、监控低帧率、平面图、按键图标、密码面板、声音、自动截图 |
 | `scripts/robot.gd` | 机器人、机载摄像头、头灯 |
+| `scripts/frame_skipper.gd` | 帧间者：只在正被看的那路监控抓帧时移动（第 1 关是无伤害的预兆版） |
 | `scripts/feed_overlay.gd` | 监控画面里的编号、时间戳、朝向箭头（画进 SubViewport，跟画面一起过 CRT） |
 | `scripts/floor_plan.gd` | 残缺平面图，点摄像头切换 |
 | `scripts/sfx.gd` | 程序合成的占位音效 |

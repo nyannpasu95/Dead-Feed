@@ -94,10 +94,12 @@ func _ready() -> void:
 		area.body_exited.connect(_on_door_area_exited.bind(id))
 	var end_area: Area3D = built["triggers"]["level_end"]
 	end_area.body_entered.connect(_on_end_entered)
+	for s in built["skippers"]:
+		s.arrived.connect(_on_skipper_arrived.bind(s.camera_id))
 
 	for n in ["1", "2", "3"]:
 		(keycaps[n]["panel"] as Control).visible = _camera_with_key(int(n)) != ""
-	floor_plan.setup(level["rooms"], _map_cameras())
+	floor_plan.setup(level["rooms"], _map_cameras(), level["walls"], _map_doors())
 	floor_plan.camera_picked.connect(func(id: String) -> void: select_view(id))
 
 	select_view(ONBOARD, true)
@@ -234,6 +236,8 @@ func _camera_with_key(k: int) -> String:
 
 func _capture_monitor_frame() -> void:
 	var cam: Dictionary = built["cameras"][view]
+	for s in built["skippers"]:
+		s.on_frame(view)
 	var in_room := _robot_in_rooms(cam["reveals"])
 	overlay.update_hud(cam["camera"], robot, view, _timestamp(), Vector2(viewport.size), in_room)
 	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
@@ -396,6 +400,8 @@ func _refresh_keypad() -> void:
 func _open_door(id: String) -> void:
 	var door: Dictionary = built["doors"][id]
 	door["open"] = true
+	floor_plan.open_doors[id] = true
+	floor_plan.queue_redraw()
 	_play("door")
 	var slab: CSGBox3D = door["node"]
 	var target: Vector3 = slab.position + (door["slide"] as Vector3)
@@ -404,6 +410,13 @@ func _open_door(id: String) -> void:
 	tw.tween_interval(0.5)
 	tw.tween_callback(func() -> void: slab.use_collision = false)
 	tw.tween_property(slab, "position", target, 2.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+
+## 帧间者走完路线：正看着那路画面的话，一阵雪花 + 一声闷响，然后它就不在了
+func _on_skipper_arrived(_id: String, cam_id: String) -> void:
+	if view == cam_id:
+		_burst_static(1.1)
+		_play("click", 0.45, -2.0)
 
 
 # ---------------------------------------------------------------- 关卡结束
@@ -547,6 +560,16 @@ func _pulsing_keys() -> Dictionary:
 	return p
 
 
+## 门在平面图上是一条线段；门板沿 z 方向（和 level_builder 一致）
+func _map_doors() -> Array:
+	var arr := []
+	for d in level["doors"]:
+		var pos: Vector2 = d["pos"]
+		var half: float = float(d["width"]) * 0.5
+		arr.append({"id": d["id"], "a": Vector2(pos.x, pos.y - half), "b": Vector2(pos.x, pos.y + half)})
+	return arr
+
+
 func _map_cameras() -> Array:
 	var arr := []
 	for c in level["cameras"]:
@@ -677,6 +700,9 @@ func _run_autotest(dir: String) -> void:
 	await _shot(dir + "/09b_cam3_trail_hidden.png")
 	select_view(ONBOARD)
 
+	_place_robot(Vector3(9.6, 0.0, 0.8), 90.0)
+	await _wait(1.0)
+	await _shot(dir + "/09d_onboard_corridor_lamp.png")
 	_place_robot(Vector3(15.2, 0.0, 0.8), 90.0)
 	await _wait(1.0)
 	await _shot(dir + "/09c_onboard_door17.png")
@@ -694,6 +720,25 @@ func _run_autotest(dir: String) -> void:
 	select_view("CAM-3")
 	await _wait(1.2)
 	await _shot(dir + "/11_cam3_door_open.png")
+
+	# 帧间者预兆：只在被看时移动，切走就停，机载看不到
+	var omen: Node3D = built["skippers"][0]
+	select_view("CAM-1")
+	await _wait(5.0)
+	await _shot(dir + "/13_cam1_omen.png")
+	var i1: int = omen.index
+	var target: Vector3 = omen.position
+	var back: Vector3 = omen.points[maxi(i1 - 2, 0)]
+	_place_robot(back, rad_to_deg(atan2(target.x - back.x, -(target.z - back.z))))
+	select_view(ONBOARD)
+	await _wait(3.0)
+	await _shot(dir + "/14_onboard_omen_invisible.png")
+	print("AUTOTEST 切走 3 秒，人影步数 %d → %d（应不变）" % [i1, omen.index])
+	select_view("CAM-1")
+	await _wait(4.0)
+	await _shot(dir + "/15_cam1_omen_closer.png")
+	await _wait(14.0)
+	print("AUTOTEST 人影走到摄像头下消失：%s（共 %d 步）" % [omen.done, omen.points.size()])
 
 	await _topdown(dir + "/00_topdown.png")
 
@@ -722,6 +767,7 @@ func _topdown(path: String) -> void:
 	cam.keep_aspect = Camera3D.KEEP_WIDTH
 	cam.size = 30.0
 	cam.far = 80.0
+	cam.cull_mask = 0xFFFFF & ~LevelBuilder.CEILING_LAYER
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = Color(0.05, 0.05, 0.08)

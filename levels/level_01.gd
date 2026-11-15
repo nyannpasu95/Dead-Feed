@@ -92,6 +92,8 @@ static func get_data() -> Dictionary:
 			# 警卫室：桌子、翻倒的椅子、散落的纸；写着密码的那张单独落在椅子旁
 			{"type": "desk", "pos": Vector2(15.1, 2.6), "size": Vector2(1.8, 0.8), "height": 0.75},
 			{"type": "chair_fallen", "pos": Vector2(12.3, 6.9), "yaw": 30.0},
+			# 倒地的台灯朝门口照：走廊没有摄像头，对面墙上的光斑告诉机载这里有个门
+			{"type": "lamp_fallen", "pos": Vector2(12.6, 2.4), "yaw": -10.0},
 			{"type": "paper", "pos": Vector2(12.95, 7.35), "yaw": 15.0, "text": "4071"},
 			# 其余的纸从桌上滑落，堆在桌前一片；从上面看，椅子旁那张孤零零的最显眼
 			{"type": "paper", "pos": Vector2(14.3, 3.5), "yaw": 40.0, "text": "2958"},
@@ -112,7 +114,20 @@ static func get_data() -> Dictionary:
 			{"type": "elevator", "rect": Rect2(24.6, 5.4, 2.4, 2.6)},
 		],
 
-		"triggers": [
+		# 帧间者预兆：CAM-1 远端、通往出口的拐角处站着一个人影，只在玩家看着 CAM-1 时，
+	# 沿机器人要走的路反向走向摄像头；走到摄像头正下方出画，画面一阵雪花后消失。无伤害。
+	"frame_skippers": [
+		{
+			"id": "omen_cam1", "camera": "CAM-1",
+			"frames_per_step": 6, "step": 0.9,  # CAM-1 6 fps → 每看 1 秒走一步，约 15 秒走完
+			"path": [
+				Vector2(8.25, 3.75), Vector2(3.75, 3.75), Vector2(3.75, 8.25),
+				Vector2(2.25, 8.25), Vector2(2.25, 9.75), Vector2(0.9, 9.9),
+			],
+		},
+	],
+
+	"triggers": [
 			{"id": "level_end", "rect": Rect2(25.1, 5.95, 1.7, 1.5)},
 		],
 	}
