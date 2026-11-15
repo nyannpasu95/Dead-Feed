@@ -1,11 +1,13 @@
 extends RefCounted
 ## 把关卡数据（levels/*.gd 返回的字典）搭成 3D 场景。
 ## 墙、货箱、家具用 CSGBox3D（带碰撞）；贴地的条纹、纸、拖痕用 MeshInstance3D。
-## 以后用资产工作台做出的模型，用 "scene" 类型的道具放进来即可。
+## 资产工作台做出的模型只当外观：道具数据里写 "model"，灰盒照样搭（碰撞、声呐、撞击声靠它），
+## 模型按灰盒尺寸装进去后把灰盒藏起来；模型文件还没有时就用灰盒外观。单独摆放的模型用 "scene" 道具。
 ## 带碰撞的 CSG 标上 surface（concrete / crate / metal），机器人撞上去时按材质出声。
 ## 声源（通风口、台灯电流声、控制台、电梯）只记下位置，由操作台挂上 3D 声音。
 
 const FrameSkipper := preload("res://scripts/frame_skipper.gd")
+const ModelFit := preload("res://scripts/model_fit.gd")
 
 const WALL_T := 0.2
 const CEILING_LAYER := 8  # 渲染层 4：天花板（俯视检查图不渲染）
@@ -186,12 +188,35 @@ static func _crates(root: Node3D, c: Dictionary, m: Dictionary) -> void:
 				continue
 			var h: float = heights[(r * 3 + col * 5) % heights.size()]
 			var center := Vector3(origin.x + (col + 0.5) * cell, h * 0.5, origin.y + (r + 0.5) * cell)
-			_box(root, center, Vector3(s, h, s), m["crate"], true)
+			var stack := _box(root, center, Vector3(s, h, s), m["crate"], true)
+			if _crate_models(stack, c, r, col, h):
+				continue  # 模型箱子自带一样的红星和喷字，凑近也分不出是哪一堆
 			# 每堆货箱南北两面同样的喷字，凑近也分不出是哪一堆
 			for side in [-1.0, 1.0]:
 				var lab := _label(root, "ОБЪЕКТ-17", 40, 0.0045, Color(0.14, 0.12, 0.10))
 				lab.position = Vector3(center.x, 0.5, center.z + side * (s * 0.5 + 0.004))
 				lab.rotation.y = 0.0 if side > 0.0 else PI
+
+
+## 一堆货箱换成模型：几只箱子摞起来正好填满碰撞盒，每只转个 90° 的倍数，免得一模一样
+static func _crate_models(stack: CSGBox3D, c: Dictionary, r: int, col: int, h: float) -> bool:
+	var path: String = c.get("model", "")
+	var n: int = c.get("per_stack", 2)
+	var s: float = c["size"]
+	var turn: Vector3 = c.get("model_turn", Vector3.ZERO)
+	var placed := false
+	for k in n:
+		var t := turn + Vector3(0.0, 90.0 * float((r * 7 + col * 3 + k * 5) % 4), 0.0)
+		var crate := ModelFit.fit(path, Vector3(s, h / float(n), s), true, t)
+		if crate == null:
+			return false
+		crate.position = Vector3(0.0, -h * 0.5 + h / float(n) * k, 0.0)
+		stack.add_child(crate)
+		placed = true
+	if placed:
+		stack.layers = 0
+		stack.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return placed
 
 
 static func _camera(root: Node3D, c: Dictionary) -> Dictionary:
@@ -264,7 +289,16 @@ static func _prop(root: Node3D, p: Dictionary, m: Dictionary, out: Dictionary) -
 			_paper(root, p, m)
 			out["papers"].append(p["pos"])  # 开过去会沙沙响
 		"desk":
-			_table(root, p["pos"], p["size"], p.get("height", 0.75), m["metal"])
+			var desk := Node3D.new()
+			root.add_child(desk)
+			var dp: Vector2 = p["pos"]
+			var ds: Vector2 = p["size"]
+			var dh: float = p.get("height", 0.75)
+			_table(desk, dp, ds, dh, m["metal"])
+			if _dress(desk, p, Vector3(dp.x, 0.0, dp.y), Vector3(ds.x, dh, ds.y), true) != null:
+				# 模型右侧（东）有一组抽屉柜，灰盒桌子只有四条腿：补一块碰撞，藏起来
+				var ped := _box(desk, Vector3(dp.x + ds.x * 0.295, 0.455, dp.y), Vector3(ds.x * 0.29, 0.53, ds.y * 0.75), m["metal"], true)
+				ModelFit.hide_boxes(ped)
 		"chair_fallen":
 			_chair_fallen(root, p, m)
 		"console":
@@ -324,11 +358,17 @@ static func _chair_fallen(root: Node3D, p: Dictionary, m: Dictionary) -> void:
 	for sx in [-1.0, 1.0]:
 		for y in [0.05, 0.40]:
 			_box(node, Vector3(sx * 0.19, y, 0.5), Vector3(0.03, 0.03, 0.44), m["metal"], false)
+	_dress(node, p, Vector3(0.0, 0.0, 0.24), Vector3(0.62, 0.62, 0.95), false)
 
 
 static func _console(root: Node3D, p: Dictionary, m: Dictionary, out: Dictionary) -> void:
 	var c: Vector2 = p["pos"]
 	var size: Vector2 = p["size"]
+	var group := Node3D.new()
+	root.add_child(group)
+	if _console_model(group, p, m, out, c, size):
+		return
+	root = group
 	_table(root, c, size, 0.95, m["metal_light"])
 	# 背板：桌下是一个黑洞洞的柜膛，拖痕在里面消失
 	_box(root, Vector3(c.x, 0.47, c.y - size.y * 0.5 + 0.06), Vector3(size.x - 0.12, 0.86, 0.04), m["dark"], true)
@@ -341,6 +381,60 @@ static func _console(root: Node3D, p: Dictionary, m: Dictionary, out: Dictionary
 		var dot := _flat(panel, Vector3(x, 0.08, 0.053), Vector3(0.05, 0.035, 0.006), m[colors[i]])
 		if i % 3 != 1:
 			out["blinkers"].append({"node": dot, "period": 0.9 + i * 0.37, "duty": 0.55, "phase": i * 0.61})
+	_dress(group, p, Vector3(c.x, 0.0, c.y), Vector3(size.x, 1.4, size.y), true)
+
+
+## 控制台模型是单人一台（约 1 × 0.8 × 0.58，操作员一侧朝 +z）：两台并排正好铺满 2.8 × 0.8，
+## 高度压到 1 米，桌下的腿洞矮过机器人，开不进去。碰撞按模型的样子重搭：
+## 背板、后半截的仪表台、桌板、三块侧板（两头和中间），腿洞里面黑洞洞的，拖痕消失在里面。
+static func _console_model(group: Node3D, p: Dictionary, m: Dictionary, out: Dictionary, c: Vector2, size: Vector2) -> bool:
+	var path: String = p.get("model", "")
+	var turn: Vector3 = p.get("model_turn", Vector3.ZERO)
+	var units := 2
+	var w := size.x / float(units)
+	var first := ModelFit.fit(path, Vector3(w, 1.0, size.y), true, turn)
+	if first == null:
+		return false
+	for i in units:
+		var unit := first if i == 0 else ModelFit.fit(path, Vector3(w, 1.0, size.y), true, turn)
+		unit.position = Vector3(c.x - size.x * 0.5 + w * (i + 0.5), 0.0, c.y)
+		group.add_child(unit)
+	var boxes := Node3D.new()
+	group.add_child(boxes)
+	var back := c.y - size.y * 0.5
+	_box(boxes, Vector3(c.x, 0.5, back + 0.03), Vector3(size.x, 1.0, 0.06), m["metal"], true)
+	_box(boxes, Vector3(c.x, 0.81, back + 0.16), Vector3(size.x, 0.38, 0.32), m["metal"], true)
+	_box(boxes, Vector3(c.x, 0.575, c.y), Vector3(size.x, 0.09, size.y), m["metal"], true)
+	for x: float in [c.x - size.x * 0.5 + 0.08, c.x, c.x + size.x * 0.5 - 0.08]:
+		_box(boxes, Vector3(x, 0.265, back + 0.325), Vector3(0.16 if x != c.x else 0.3, 0.53, 0.65), m["metal"], true)
+	ModelFit.hide_boxes(boxes)
+	# 仪表台顶上一排会闪的状态灯：CAM-3 从背后高处看得到，控制室不是死的
+	var colors := ["glow_green", "glow_amber", "glow_green", "glow_red"]
+	for i in units:
+		var ux := c.x - size.x * 0.5 + w * (i + 0.5)
+		for k in colors.size():
+			var dot := _flat(group, Vector3(ux + (k - 1.5) * w * 0.17, 1.003, back + 0.12), Vector3(0.05, 0.006, 0.035), m[colors[k]])
+			if k != 1:
+				var n := i * colors.size() + k
+				out["blinkers"].append({"node": dot, "period": 0.9 + n * 0.37, "duty": 0.55, "phase": n * 0.61})
+	return true
+
+
+## 有模型就换上：灰盒（boxes 下面全部）藏起来，模型装进 box_size、底面中心放在 at。
+## 数据里 "model_turn" 是先把模型转到朝向（度），"model_fit" = "axis" / "uniform" 覆盖默认缩放方式。
+static func _dress(boxes: Node3D, p: Dictionary, at: Vector3, box_size: Vector3, per_axis: bool) -> Node3D:
+	if not p.has("model"):
+		return null
+	if p.has("model_fit"):
+		per_axis = str(p["model_fit"]) == "axis"
+	var turn: Vector3 = p.get("model_turn", Vector3.ZERO)
+	var holder := ModelFit.fit(str(p["model"]), box_size, per_axis, turn)
+	if holder == null:
+		return null
+	ModelFit.hide_boxes(boxes)
+	holder.position = at
+	boxes.add_child(holder)
+	return holder
 
 
 ## 倒在地上的台灯：灯光从门口照进走廊，在对面墙上投出一块光斑，偶尔闪一下。

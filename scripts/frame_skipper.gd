@@ -7,6 +7,10 @@ extends Node3D
 signal arrived(id: String)
 
 const RobotScript := preload("res://scripts/robot.gd")
+const ModelFit := preload("res://scripts/model_fit.gd")
+const MODEL := "res://assets/models/figure.glb"
+const MODEL_TURN := Vector3(0.0, 180.0, 0.0)  # 模型正面朝 +z，转过来朝 -z（_place 让 -z 对着走的方向）
+const DARKEN := 0.22  # 贴图颜色乘这个数：红外里是一团黑，细节只剩一点
 
 var id := ""
 var camera_id := ""
@@ -74,8 +78,14 @@ static func _resample(path: Array, step: float) -> PackedVector3Array:
 	return out
 
 
-## 细长的黑色人影：手臂垂得过长，红外画面里是一块没有细节的黑
+## 细长的黑色人影：手臂垂得过长，红外画面里是一块没有细节的黑。
+## 有资产工作台做的模型就用它（压暗，只剩轮廓和防毒面具的两只眼），没有就用方块。
 func _build_figure() -> void:
+	var model := ModelFit.fit(MODEL, Vector3(0.7, 2.0, 0.5), false, MODEL_TURN, RobotScript.MONITOR_ONLY_LAYER, false)
+	if model != null:
+		_darken(model)
+		add_child(model)
+		return
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.025, 0.025, 0.025)
 	mat.roughness = 1.0
@@ -104,3 +114,19 @@ func _part(sphere: bool, center: Vector3, size: Vector3, mat: Material) -> void:
 	mi.layers = RobotScript.MONITOR_ONLY_LAYER
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
+
+
+## 每个表面的材质复制一份，颜色压暗、去掉高光
+func _darken(node: Node) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		for i in mi.mesh.get_surface_count():
+			var mat := mi.get_active_material(i)
+			if mat is BaseMaterial3D:
+				var dark := (mat as BaseMaterial3D).duplicate() as BaseMaterial3D
+				dark.albedo_color = dark.albedo_color * Color(DARKEN, DARKEN, DARKEN, 1.0)
+				dark.roughness = 1.0
+				dark.metallic = 0.0
+				mi.set_surface_override_material(i, dark)
+	for child in node.get_children():
+		_darken(child)

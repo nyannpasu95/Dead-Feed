@@ -31,7 +31,8 @@ GitHub Game Off 2026 参赛作品，主题 **SHIFT**。独立开发，AI 辅助�
 
 - 引擎：Godot 4，**Compatibility 渲染器**（项目一开始就设定，不要改成 Forward+）
 - 平台：**Web 优先**（itch.io 浏览器内），同时导出桌面版
-- 场景：CSG 灰盒为主，少量重复使用的道具
+- 场景：CSG 灰盒负责碰撞、声呐和撞击声；道具和机器人的外观用资产工作台（Tripo）做的模型，按灰盒尺寸装进去，模型文件不在时自动回退灰盒外观
+- 模型流程：工作台生成（每件约 25 积分，先问）→ `tools/optimize_glb.py` 压贴图到 1K、需要时减面（多次重复的货箱 6000 面，减太狠会破洞）→ 放进 `assets/models/` → `--import` 重新导入 → 关卡数据写 `"model"`；`tools/preview_models.gd` 四面预览查朝向
 - 监控画面渲染到**低分辨率 SubViewport**，**同一时间只渲染一路画面**
 - 画面后处理：CRT shader（扫描线、噪点、桶形畸变）
 - 控制动态光数量（Compatibility 对单个物体受影响的光源数有上限）
@@ -88,7 +89,8 @@ Godot 4.7.2（`/Applications/Godot.app`）。整关由代码从数据搭出来�
 | 文件 | 作用 |
 | --- | --- |
 | `levels/level_01.gd` | 第 1 关数据：房间、墙段、货箱迷宫（字符网格）、摄像头、门、道具、声音地标、触发器 |
-| `scripts/level_builder.gd` | 把关卡数据搭成 CSG 灰盒；碰撞体标 `surface` 材质；记下声源位置；`"scene"` 道具类型用来放资产工作台做的模型 |
+| `scripts/level_builder.gd` | 把关卡数据搭成 CSG 灰盒；碰撞体标 `surface` 材质；记下声源位置；道具写了 `"model"` 就换上模型外观（控制台是两台并排、按模型重搭碰撞）；`"scene"` 道具单独摆模型 |
+| `scripts/model_fit.gd` | 把模型按灰盒尺寸装进去（等比或三轴各自缩放、先转朝向），藏起灰盒外观 |
 | `scripts/main.gd` | 操作台：视角切换、监控低帧率、拍照（两个照片 SubViewport 轮流用）、声呐、冷却、平面图、按键图标、密码面板、3D 声音（听者跟随画面、隔墙遮挡）、自动截图 |
 | `scripts/robot.gd` | 机器人、机载相机挂点、拍照闪光、前向探照灯、声呐射线、撞击（材质）和电机憋劲 |
 | `scripts/frame_skipper.gd` | 帧间者：只在正被看的那路监控抓帧时移动（第 1 关是无伤害的预兆版） |
@@ -96,9 +98,12 @@ Godot 4.7.2（`/Applications/Godot.app`）。整关由代码从数据搭出来�
 | `scripts/floor_plan.gd` | 残缺平面图，点摄像头切换 |
 | `scripts/sonar_scope.gd` | 前向扇形声呐屏：ping 扩散、回声点淡出 |
 | `scripts/sfx.gd` | 程序合成的占位音效（含声音地标、撞击、压纸） |
+| `assets/models/` | 资产工作台做的模型（货箱、桌、椅、控制台、帧间者人影、机器人），贴图 1K |
+| `tools/` | `optimize_glb.py`（Blender 后台减面压贴图）、`preview_models.gd`（模型四面预览） |
 | `shaders/crt.gdshader` | CRT 后处理；`mono` 切换照片彩色 / 监控红外，`reveal` 是照片逐行传回 |
 
 - 运行：`/Applications/Godot.app/Contents/MacOS/Godot --path .`
+- 换了 `assets/models/` 里的文件后先导入：`/Applications/Godot.app/Contents/MacOS/Godot --headless --path . --import`（直接运行游戏会用旧的导入缓存）
 - 自动截图检查（改了画面或关卡后跑一次，逐张看图）：
   `/Applications/Godot.app/Contents/MacOS/Godot --path . --quit-after 24000 -- --autotest=<输出目录>`
 - GDScript 注意：从字典 / 数组取出的值是 Variant，不能用 `:=` 推断类型，要写明类型

@@ -46,6 +46,7 @@ static func get_data() -> Dictionary:
 			"cell": 1.5,
 			"size": 1.42,
 			"heights": [1.5, 2.0, 2.3],
+			"model": "res://assets/models/crate.glb", "per_stack": 2,
 			"rows": [
 				"....#.",
 				".##.#.",
@@ -93,8 +94,10 @@ static func get_data() -> Dictionary:
 			{"type": "stripe", "from": Vector2(7.5, 0.8), "to": Vector2(19.2, 0.8), "width": 0.22},
 
 			# 警卫室：桌子、翻倒的椅子、散落的纸；写着密码的那张单独落在椅子旁
-			{"type": "desk", "pos": Vector2(15.1, 2.6), "size": Vector2(1.8, 0.8), "height": 0.75},
-			{"type": "chair_fallen", "pos": Vector2(12.3, 6.9), "yaw": 30.0},
+			{"type": "desk", "pos": Vector2(15.1, 2.6), "size": Vector2(1.8, 0.8), "height": 0.75,
+				"model": "res://assets/models/desk.glb"},
+			{"type": "chair_fallen", "pos": Vector2(12.3, 6.9), "yaw": 30.0,
+				"model": "res://assets/models/chair.glb", "model_turn": Vector3(-90.0, 0.0, 0.0)},  # 仰面倒下
 			# 倒地的台灯朝门口照：走廊没有摄像头，对面墙上的光斑告诉机载这里有个门
 			{"type": "lamp_fallen", "pos": Vector2(12.6, 2.4), "yaw": -10.0},
 			{"type": "paper", "pos": Vector2(12.95, 7.35), "yaw": 15.0, "text": "4071"},
@@ -112,8 +115,10 @@ static func get_data() -> Dictionary:
 			{"type": "paper", "pos": Vector2(15.8, 5.4), "yaw": -15.0, "text": "7051"},
 
 			# 控制室：控制台、拖痕（和地面亮度相同、只有颜色不同 → 只有机载看得出）、电梯
-			{"type": "console", "pos": Vector2(22.4, 2.8), "size": Vector2(2.8, 0.8)},
-			{"type": "drag_mark", "from": Vector2(22.35, 7.0), "to": Vector2(22.35, 2.5), "width": 0.09},
+			{"type": "console", "pos": Vector2(22.4, 2.8), "size": Vector2(2.8, 0.8),
+				"model": "res://assets/models/console.glb"},
+			# 控制台是两台并排，拖痕钻进东边那台的腿洞
+			{"type": "drag_mark", "from": Vector2(23.1, 7.0), "to": Vector2(23.1, 2.5), "width": 0.09},
 			{"type": "elevator", "rect": Rect2(24.6, 5.4, 2.4, 2.6)},
 		],
 

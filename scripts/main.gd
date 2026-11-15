@@ -1056,7 +1056,7 @@ func _run_autotest(dir: String) -> void:
 	select_view(ONBOARD)
 	await _photo_now()
 	await _shot(dir + "/08_photo_trail.png")
-	_place_robot(Vector3(22.35, 0.0, 4.6), 0.0)
+	_place_robot(Vector3(23.1, 0.0, 4.6), 0.0)
 	await _photo_now()
 	await _sonar_now()
 	await _shot(dir + "/09_photo_sonar_under_console.png")
@@ -1064,9 +1064,14 @@ func _run_autotest(dir: String) -> void:
 	await _wait(1.2)
 	await _shot(dir + "/09b_cam3_trail_hidden.png")
 	# 探照灯照在拖痕上，单色监控里也不该看出来
-	_place_robot(Vector3(22.35, 0.0, 3.6), 180.0)
+	_place_robot(Vector3(23.1, 0.0, 3.6), 180.0)
 	await _wait(1.2)
 	await _shot(dir + "/09e_cam3_beam_on_trail.png")
+	# 控制台正面：照片里看仪表和腿洞
+	select_view(ONBOARD)
+	_place_robot(Vector3(22.4, 0.0, 6.2), 0.0)
+	await _photo_now()
+	await _shot(dir + "/09f_photo_console_front.png")
 	select_view(ONBOARD)
 
 	_place_robot(Vector3(9.6, 0.0, 0.8), 90.0)

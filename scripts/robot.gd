@@ -14,6 +14,12 @@ const BACK_SPEED := 0.6
 const TURN_SPEED := 0.785398  # 45°/秒
 const ACCEL := 3.0
 const TURN_ACCEL := 4.0
+const ModelFit := preload("res://scripts/model_fit.gd")
+const MODEL := "res://assets/models/robot.glb"  # 资产工作台做的外观；没有时用方块
+const MODEL_TURN := Vector3(0.0, 180.0, 0.0)  # 模型车头朝 +z，转到 -z
+# 模型（约 0.66 × 0.8 × 0.8 米）上的位置：摄像头镜头、云台顶上探照灯的灯头
+const MODEL_CAMERA := Vector3(0.0, 0.42, -0.40)
+const MODEL_LAMP := Vector3(0.0, 0.72, -0.31)
 const BODY_LAYER := 2
 const MONITOR_ONLY_LAYER := 4  # 渲染层 3：只有监控看得到的东西（帧间者）
 const PHOTO_CULL := 0xFFFFF & ~BODY_LAYER & ~MONITOR_ONLY_LAYER
@@ -37,6 +43,7 @@ var searchlight: SpotLight3D
 var strain := 0.0
 var scrape := 0.0
 var _was_touching := false
+var _has_model := false
 var _sonar_pending := false
 var _rng := RandomNumberGenerator.new()
 
@@ -154,6 +161,12 @@ func _sonar_scan() -> PackedVector3Array:
 func _build_body() -> void:
 	var shell := _mat(Color(0.74, 0.74, 0.70))
 	var dark := _mat(Color(0.10, 0.10, 0.10))
+	var model := ModelFit.fit(MODEL, Vector3(0.84, 0.8, 0.86), false, MODEL_TURN, BODY_LAYER)
+	if model != null:
+		add_child(model)
+		_has_model = true
+		_build_lens()
+		return
 	_part(Vector3(0.0, 0.22, 0.02), Vector3(0.56, 0.22, 0.72), shell)       # 车体
 	_part(Vector3(0.33, 0.10, 0.0), Vector3(0.12, 0.20, 0.82), dark)        # 履带
 	_part(Vector3(-0.33, 0.10, 0.0), Vector3(0.12, 0.20, 0.82), dark)
@@ -161,23 +174,28 @@ func _build_body() -> void:
 	_part(Vector3(0.0, 0.37, 0.28), Vector3(0.26, 0.10, 0.12), dark)        # 电缆卷盘
 	# 探照灯：云台顶上的小灯筒，只有前面的灯罩亮（不投影，免得挡住自己的光）
 	_part(Vector3(0.0, 0.52, -0.26), Vector3(0.11, 0.09, 0.16), dark).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_build_lens()
+
+
+func _build_lens() -> void:
 	var lens := StandardMaterial3D.new()
 	lens.albedo_color = Color(0.3, 0.25, 0.15)
 	lens.emission_enabled = true
 	lens.emission = Color(1.0, 0.85, 0.6)
 	lens.emission_energy_multiplier = 2.5
-	_part(Vector3(0.0, 0.52, -0.345), Vector3(0.08, 0.065, 0.01), lens).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var at := MODEL_LAMP + Vector3(0.0, 0.0, 0.015) if _has_model else Vector3(0.0, 0.52, -0.345)
+	_part(at, Vector3(0.07, 0.06, 0.01), lens).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
 func _build_onboard() -> void:
 	camera_mount = Node3D.new()
-	camera_mount.position = Vector3(0.0, 0.45, -0.38)
+	camera_mount.position = MODEL_CAMERA if _has_model else Vector3(0.0, 0.45, -0.38)
 	camera_mount.rotation_degrees = Vector3(-12.0, 0.0, 0.0)
 	add_child(camera_mount)
 
 	# 闪光：只在拍照那一帧亮，照亮前方 3～4 米
 	flash = SpotLight3D.new()
-	flash.position = Vector3(0.0, 0.40, -0.36)
+	flash.position = MODEL_CAMERA + Vector3(0.0, -0.03, -0.01) if _has_model else Vector3(0.0, 0.40, -0.36)
 	flash.rotation_degrees = Vector3(-10.0, 0.0, 0.0)
 	flash.spot_range = 4.6
 	flash.spot_angle = 34.0
@@ -190,8 +208,8 @@ func _build_onboard() -> void:
 
 	# 探照灯：常亮，窄光束略朝下，前方一两米外的地面上一块长光斑，远处照上墙
 	searchlight = SpotLight3D.new()
-	searchlight.position = Vector3(0.0, 0.52, -0.36)
-	searchlight.rotation_degrees = Vector3(-9.0, 0.0, 0.0)
+	searchlight.position = MODEL_LAMP + Vector3(0.0, 0.0, -0.02) if _has_model else Vector3(0.0, 0.52, -0.36)
+	searchlight.rotation_degrees = Vector3(-12.0 if _has_model else -9.0, 0.0, 0.0)  # 灯装得越高越往下压，光斑中心仍在三米多外
 	searchlight.spot_range = 7.0
 	searchlight.spot_angle = 17.0
 	searchlight.spot_angle_attenuation = 1.1
