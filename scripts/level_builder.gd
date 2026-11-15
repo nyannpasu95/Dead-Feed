@@ -2,6 +2,8 @@ extends RefCounted
 ## 把关卡数据（levels/*.gd 返回的字典）搭成 3D 场景。
 ## 墙、货箱、家具用 CSGBox3D（带碰撞）；贴地的条纹、纸、拖痕用 MeshInstance3D。
 ## 以后用资产工作台做出的模型，用 "scene" 类型的道具放进来即可。
+## 带碰撞的 CSG 标上 surface（concrete / crate / metal），机器人撞上去时按材质出声。
+## 声源（通风口、台灯电流声、控制台、电梯）只记下位置，由操作台挂上 3D 声音。
 
 const FrameSkipper := preload("res://scripts/frame_skipper.gd")
 
@@ -19,6 +21,8 @@ static func build(data: Dictionary, root: Node3D) -> Dictionary:
 		"triggers": {},
 		"blinkers": [],
 		"skippers": [],
+		"sounds": [],
+		"papers": [],
 	}
 	var m := _materials()
 	var wall_h: float = data["wall_height"]
@@ -39,6 +43,8 @@ static func build(data: Dictionary, root: Node3D) -> Dictionary:
 		out["doors"][d["id"]] = _door(root, d, wall_h, m)
 	for t in data["triggers"]:
 		out["triggers"][t["id"]] = _area(root, t["rect"], 1.2)
+	for snd in data.get("sounds", []):
+		_sound_point(root, snd, m, out)
 	for f in data.get("frame_skippers", []):
 		var skipper := FrameSkipper.new()
 		root.add_child(skipper)
@@ -78,7 +84,7 @@ static func _glow(color: Color, energy := 1.6) -> StandardMaterial3D:
 
 
 static func _materials() -> Dictionary:
-	return {
+	var m := {
 		"floor": _mat(Color(0.27, 0.27, 0.26), 0.95),
 		"wall": _mat(Color(0.46, 0.46, 0.44), 0.95),
 		"crate": _mat(Color(0.58, 0.48, 0.33), 0.9),
@@ -94,6 +100,10 @@ static func _materials() -> Dictionary:
 		"glow_amber": _glow(Color(1.0, 0.62, 0.15), 1.6),
 		"glow_pale": _glow(Color(0.85, 0.9, 1.0), 1.3),
 	}
+	(m["crate"] as Material).set_meta("surface", "crate")
+	for k in ["metal", "metal_light", "dark"]:
+		(m[k] as Material).set_meta("surface", "metal")
+	return m
 
 
 static func _box(parent: Node, center: Vector3, size: Vector3, mat: Material, collide: bool) -> CSGBox3D:
@@ -102,6 +112,8 @@ static func _box(parent: Node, center: Vector3, size: Vector3, mat: Material, co
 	b.position = center
 	b.material = mat
 	b.use_collision = collide
+	if collide:
+		b.set_meta("surface", str(mat.get_meta("surface", "concrete")))
 	parent.add_child(b)
 	return b
 
@@ -197,7 +209,7 @@ static func _camera(root: Node3D, c: Dictionary) -> Dictionary:
 	var light := OmniLight3D.new()
 	light.omni_range = 22.0
 	light.omni_attenuation = 0.6
-	light.light_energy = 3.0
+	light.light_energy = 2.2  # 留出余地：机器人探照灯的光斑要在监控里看得出来
 	light.position = pos + Vector3(0.0, -0.3, 0.0)
 	light.visible = false
 	root.add_child(light)
@@ -250,6 +262,7 @@ static func _prop(root: Node3D, p: Dictionary, m: Dictionary, out: Dictionary) -
 			_strip(root, p["from"], p["to"], p["width"], m["stripe"])
 		"paper":
 			_paper(root, p, m)
+			out["papers"].append(p["pos"])  # 开过去会沙沙响
 		"desk":
 			_table(root, p["pos"], p["size"], p.get("height", 0.75), m["metal"])
 		"chair_fallen":
@@ -355,6 +368,8 @@ static func _lamp_fallen(root: Node3D, p: Dictionary, m: Dictionary, out: Dictio
 	spot.light_color = Color(1.0, 0.82, 0.58)
 	lit.add_child(spot)
 	out["blinkers"].append({"node": lit, "period": 3.1, "duty": 0.92, "phase": 0.4})
+	# 灯管的电流声，灯灭时一起停
+	out["sounds"].append({"type": "lamp_hum", "pos": Vector3(pos.x, 0.2, pos.y), "follows": lit})
 
 
 static func _drag_mark(root: Node3D, p: Dictionary, m: Dictionary) -> void:
@@ -408,3 +423,17 @@ static func _scene(root: Node3D, p: Dictionary) -> void:
 	inst.rotation.y = deg_to_rad(-float(p.get("yaw", 0.0)))
 	inst.scale = Vector3.ONE * float(p.get("scale", 1.0))
 	root.add_child(inst)
+
+
+## 声源：位置交给操作台挂 3D 声音；通风口顺便在墙上画一块格栅
+static func _sound_point(root: Node3D, snd: Dictionary, m: Dictionary, out: Dictionary) -> void:
+	var pos: Vector3 = snd["pos"]
+	out["sounds"].append({"type": str(snd["type"]), "pos": pos})
+	if str(snd["type"]) == "vent":
+		var grille := Node3D.new()
+		grille.position = pos
+		grille.rotation.y = deg_to_rad(-float(snd.get("yaw", 0.0)))
+		root.add_child(grille)
+		_flat(grille, Vector3.ZERO, Vector3(0.8, 0.5, 0.03), m["dark"])
+		for i in 5:
+			_flat(grille, Vector3(0.0, -0.2 + i * 0.1, 0.02), Vector3(0.74, 0.025, 0.03), m["metal_light"])

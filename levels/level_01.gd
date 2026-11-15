@@ -4,6 +4,9 @@ extends RefCounted
 ## heading 用罗盘角度：0 = 北（-z），90 = 东（+x）。
 
 
+const WALL_FACE := 0.11  # 北墙（z = 0，厚 0.2）的南侧墙面
+
+
 static func get_data() -> Dictionary:
 	return {
 		"id": "level_01",
@@ -125,6 +128,16 @@ static func get_data() -> Dictionary:
 				Vector2(2.25, 8.25), Vector2(2.25, 9.75), Vector2(0.9, 9.9),
 			],
 		},
+	],
+
+	# 声音地标：照片是静止的，声音是实时的。机载时以机器人为中心、分左右，看监控时从摄像头的位置听
+	# （台灯的电流声由台灯自己带，见 level_builder._lamp_fallen）
+	"sounds": [
+		# 装载区出口外、走廊北墙上的通风口：在货箱迷宫里靠它的嗡声找出口
+		{"type": "vent", "pos": Vector3(9.9, 2.4, WALL_FACE)},
+		# 控制台的继电器和提示音、电梯的低鸣：门后的目标
+		{"type": "console", "pos": Vector3(22.4, 1.1, 2.6)},
+		{"type": "elevator", "pos": Vector3(26.4, 1.4, 6.7)},
 	],
 
 	"triggers": [

@@ -5,6 +5,8 @@ extends Control
 ## 切换雪花与继电器声、残缺平面图、按键图标、17 号门密码面板、关卡结束。
 ## 同一时间只渲染一路画面：所有摄像头共用一个低分辨率 SubViewport；
 ## 照片另有两个 SubViewport 轮流用（共用同一个世界），只在按下快门那一帧渲染。
+## 声音：照片是静止的，声音是实时的。听者跟着画面走——看照片时在机器人身上，
+## 看监控时在那路摄像头上；机器人的声音和关卡里的声音地标都是 3D 的，隔着墙会变闷。
 
 const LevelData := preload("res://levels/level_01.gd")
 const LevelBuilder := preload("res://scripts/level_builder.gd")
@@ -23,6 +25,16 @@ const SONAR_COOLDOWN := 3.5
 const MONITOR_RES := Vector2i(320, 240)
 const SWITCH_STATIC := 0.6
 const CLOCK_START := 3 * 3600 + 12 * 60 + 40  # 监控时间戳从 03:12:40 开始
+
+# 3D 声音的基础音量（dB）和参考距离（米）
+const SOUND_DB := {
+	"shutter": -7.0, "charge": -21.0, "ping": -7.0, "rustle": -7.0,
+	"thud_concrete": -3.0, "thud_crate": -3.0, "thud_metal": -7.0,
+	"vent": -6.0, "lamp_hum": -16.0, "console": -8.0, "elevator": -4.0,
+}
+const SOUND_UNIT := {"vent": 1.6, "lamp_hum": 0.9, "console": 1.4, "elevator": 2.0}
+# 看照片时听者在机器人相机上，离机身声源只有 0.4 米左右（距离衰减反而 +13 dB）：Robot 总线压回来
+const ROBOT_CLOSE_DB := -12.0
 
 const PHOSPHOR := Color(0.45, 1.0, 0.62)
 const AMBER := Color(1.0, 0.7, 0.25)
@@ -85,6 +97,20 @@ var keypad_entry := ""
 var keypad_flash := ""
 var keypad_flash_left := 0.0
 
+var ear: AudioListener3D
+var sfx := {}
+var field_sources: Array = []   # 关卡声源：{player, base_db, follows, occ}
+var robot_occ := 0.0
+var motor_db := -40.0
+var papers: Array = []
+var paper_under := {}
+var last_bump := ""
+var bump_time := -100.0
+var last_bump_strength := 0.0
+var peak_log: Array = []  # 自动测试：[时间, 总线峰值]
+var peak_bus := -1
+var rustle_count := 0
+
 var keycaps := {}
 var hint_done := {"move": false, "photo": false, "shift": false, "sonar": false, "e": false}
 var players := {}
@@ -106,6 +132,9 @@ func _ready() -> void:
 	robot = RobotScript.new()
 	world.add_child(robot)
 	robot.sonar_returned.connect(_on_sonar_returned)
+	robot.bumped.connect(_on_robot_bumped)
+	papers = built["papers"]
+	_setup_field_audio()
 	var start: Dictionary = level["robot_start"]
 	_place_robot(start["pos"], start["heading"])
 
@@ -230,7 +259,7 @@ func select_view(id: String, silent := false) -> void:
 		(cam["camera"] as Camera3D).make_current()
 		viewport.size = MONITOR_RES
 		overlay.set_hud(true)
-		_set_crt(1.0, 0.09, MONITOR_RES.y, 1.25)
+		_set_crt(1.0, 0.09, MONITOR_RES.y, 1.35)
 		for room_id in cam["reveals"]:
 			floor_plan.revealed[room_id] = true
 		frame_accum = 0.0
@@ -336,13 +365,21 @@ func _process(delta: float) -> void:
 		photo_reveal = minf(1.0, photo_reveal + delta / PHOTO_SCAN_TIME)
 	crt.set_shader_parameter("reveal", photo_reveal if view == ONBOARD and not finished else 1.0)
 
+	if peak_bus >= 0:
+		peak_log.append([clock, maxf(AudioServer.get_bus_peak_volume_left_db(peak_bus, 0), AudioServer.get_bus_peak_volume_right_db(peak_bus, 0))])
 	_update_blinkers()
 	_update_keypad(delta)
 	_update_keys(delta)
+	# 电机：开得越快越响；顶着东西开时憋着叫（音调升高）
 	var motion := robot.motion_level()
-	var motor: AudioStreamPlayer = players["motor"]
-	motor.volume_db = linear_to_db(0.08 + 0.92 * motion) - 6.0
-	motor.pitch_scale = 0.85 + 0.35 * motion
+	var motor: AudioStreamPlayer3D = players["motor"]
+	motor.volume_db = linear_to_db(0.08 + 0.92 * maxf(motion, robot.strain)) - 7.0 + 3.0 * robot.strain
+	motor.pitch_scale = 0.85 + 0.35 * motion + 0.3 * robot.strain
+	# 贴着墙蹭：越快越响
+	var scrape_player: AudioStreamPlayer3D = players["scrape"]
+	scrape_player.volume_db = linear_to_db(maxf(robot.scrape, 0.0001)) - 7.0
+	scrape_player.pitch_scale = 0.8 + 0.4 * robot.scrape
+	_update_ear()
 
 
 func _update_blinkers() -> void:
@@ -383,15 +420,21 @@ func _take_photo(force := false) -> void:
 	stamp.reset_size()
 	stamp.position = Vector2(PHOTO_RES) - stamp.size - Vector2(16.0, 12.0)
 	robot.flash.visible = true
+	robot.searchlight.visible = false  # 曝光很短，照片里只有闪光
 	photo_rendering = true
 	_set_monitor_lights(false)
 	photo_vps[photo_front].render_target_update_mode = SubViewport.UPDATE_ONCE
 	_refresh_feed_texture()
 	_play("shutter")
 	await RenderingServer.frame_post_draw
-	robot.flash.visible = false
 	photo_rendering = false
+	robot.searchlight.visible = true
 	_set_monitor_lights(true)
+	# 正看着监控的话，补抓一帧：画面里闪一下，看得出机器人在哪（哪怕它本身被挡住）
+	if view != ONBOARD and not finished:
+		_capture_monitor_frame()
+		await RenderingServer.frame_post_draw
+	robot.flash.visible = false
 	_play("transmit")
 	_play("charge")
 
@@ -425,6 +468,122 @@ func _in_blind_spot() -> bool:
 		if _robot_in_rooms(built["cameras"][cid]["reveals"]):
 			return false
 	return true
+
+
+# ---------------------------------------------------------------- 3D 声音
+
+## 关卡搭好之后：听者、机器人身上的声音、关卡声源、门
+func _setup_field_audio() -> void:
+	viewport.audio_listener_enable_3d = true
+	ear = AudioListener3D.new()
+	world.add_child(ear)
+	ear.make_current()
+	# 机器人身上的声音走 Robot 总线：隔着墙时整条总线变闷
+	_add_player_3d("motor", sfx["motor"], robot, Vector3(0.0, 0.3, 0.0), "Robot", 2.0, -40.0)
+	for n in ["shutter", "charge", "ping", "thud_concrete", "thud_crate", "thud_metal", "rustle"]:
+		_add_player_3d(n, sfx[n], robot, Vector3(0.0, 0.3, 0.0), "Robot", 2.0, SOUND_DB[n])
+	_add_player_3d("scrape", sfx["scrape"], robot, Vector3(0.0, 0.3, 0.0), "Robot", 2.0, -80.0)
+	for n in ["motor", "scrape", "shutter", "charge", "ping", "thud_concrete", "thud_crate", "thud_metal", "rustle"]:
+		(players[n] as AudioStreamPlayer3D).max_db = 24.0  # 不封顶，音量差靠 volume_db 和 Robot 总线
+	(players["motor"] as AudioStreamPlayer3D).play()
+	(players["scrape"] as AudioStreamPlayer3D).play()
+	for d in level["doors"]:
+		var dp: Vector2 = d["pos"]
+		_add_player_3d("door_" + str(d["id"]), sfx["door"], world, Vector3(dp.x, 1.3, dp.y), "Field", 2.5, 0.0)
+	for snd in built["sounds"]:
+		var kind: String = snd["type"]
+		var base: float = SOUND_DB[kind]
+		var player := _add_player_3d("", sfx[kind], world, snd["pos"], "Field", SOUND_UNIT[kind], base)
+		player.max_distance = 16.0
+		player.play()
+		field_sources.append({"player": player, "base_db": base, "follows": snd.get("follows"), "occ": 0.0})
+
+
+func _add_player_3d(player_name: String, stream: AudioStream, parent: Node3D, pos: Vector3, bus: String, unit: float, volume: float) -> AudioStreamPlayer3D:
+	var p := AudioStreamPlayer3D.new()
+	p.stream = stream
+	p.bus = bus
+	p.unit_size = unit
+	p.max_db = 3.0
+	p.volume_db = volume
+	p.attenuation_filter_cutoff_hz = 6000.0
+	p.doppler_tracking = AudioStreamPlayer3D.DOPPLER_TRACKING_DISABLED
+	parent.add_child(p)
+	p.position = pos
+	if player_name != "":
+		players[player_name] = p
+	return p
+
+
+## 听者跟着画面：看照片时在机器人的相机上，看监控时在那路摄像头上
+func _update_ear() -> void:
+	if view == ONBOARD or finished:
+		ear.global_transform = robot.camera_mount.global_transform
+	else:
+		ear.global_transform = (built["cameras"][view]["camera"] as Camera3D).global_transform
+
+
+## 每个声源和听者之间有墙或货箱挡着，就变小、变闷；台灯灭了，电流声也停
+func _physics_process(delta: float) -> void:
+	if ear == null:
+		return
+	var space := world.get_world_3d().direct_space_state
+	var ear_pos := ear.global_position
+	robot_occ = move_toward(robot_occ, 1.0 if _blocked(space, ear_pos, robot.global_position + Vector3(0.0, 0.4, 0.0)) else 0.0, delta * 3.0)
+	var rb := AudioServer.get_bus_index("Robot")
+	var close_db := ROBOT_CLOSE_DB if view == ONBOARD or finished else 0.0
+	AudioServer.set_bus_volume_db(rb, close_db - 12.0 * robot_occ)
+	(AudioServer.get_bus_effect(rb, 0) as AudioEffectLowPassFilter).cutoff_hz = lerpf(20000.0, 700.0, robot_occ)
+	for src in field_sources:
+		var p: AudioStreamPlayer3D = src["player"]
+		var occ := move_toward(float(src["occ"]), 1.0 if _blocked(space, ear_pos, p.global_position) else 0.0, delta * 3.0)
+		src["occ"] = occ
+		var db: float = float(src["base_db"]) - 12.0 * occ
+		var follows: Node3D = src["follows"]
+		if follows != null and not follows.is_visible_in_tree():
+			db = -80.0
+		p.volume_db = db
+		p.attenuation_filter_cutoff_hz = lerpf(6000.0, 650.0, occ)
+	_check_papers()
+
+
+func _blocked(space: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3) -> bool:
+	var dist := from.distance_to(to)
+	if dist < 0.8:
+		return false
+	var hit := space.intersect_ray(PhysicsRayQueryParameters3D.create(from, to, 1))
+	if hit.is_empty():
+		return false
+	var at: Vector3 = hit["position"]
+	return from.distance_to(at) < dist - 0.6  # 打到声源自己所在的物体不算
+
+
+## 履带压过纸：沙沙一声。照片里看不出自己压在纸上，听得出
+func _check_papers() -> void:
+	var rp := Vector2(robot.global_position.x, robot.global_position.z)
+	for i in papers.size():
+		var paper_pos: Vector2 = papers[i]
+		var under := rp.distance_to(paper_pos) < 0.4
+		if under and not paper_under.has(i) and absf(robot.speed) > 0.08:
+			_play("rustle", randf_range(0.9, 1.15))
+			rustle_count += 1
+		if under:
+			paper_under[i] = true
+		else:
+			paper_under.erase(i)
+
+
+## 撞到东西：机器人那里一声按材质的撞击（3D，看监控时从摄像头的位置听），
+## 操作台上的碰撞传感器再短短响一下（不管看哪路画面都听得到）
+func _on_robot_bumped(surface: String, strength: float) -> void:
+	last_bump = surface
+	bump_time = clock
+	last_bump_strength = strength
+	var key := "thud_" + surface
+	if not players.has(key):
+		key = "thud_concrete"
+	_play(key, randf_range(0.92, 1.08), linear_to_db(0.35 + 0.65 * strength))
+	_play("bump_alarm", 1.0, linear_to_db(0.5 + 0.5 * strength))
 
 
 # ---------------------------------------------------------------- 门与密码面板
@@ -517,7 +676,7 @@ func _open_door(id: String) -> void:
 	door["open"] = true
 	floor_plan.open_doors[id] = true
 	floor_plan.queue_redraw()
-	_play("door")
+	_play("door_" + id)
 	var slab: CSGBox3D = door["node"]
 	var target: Vector3 = slab.position + (door["slide"] as Vector3)
 	(door["lamp_mat"] as StandardMaterial3D).emission = Color(0.3, 1.0, 0.4)
@@ -546,6 +705,7 @@ func _on_end_entered(body: Node3D) -> void:
 	_burst_static(1.6)
 	await get_tree().create_timer(1.4).timeout
 	world.visible = false
+	AudioServer.set_bus_mute(AudioServer.get_bus_index("Field"), true)
 	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_refresh_feed_texture()
 	var secs := int(clock)
@@ -760,36 +920,43 @@ func _map_cameras() -> Array:
 
 # ---------------------------------------------------------------- 声音
 
+## 总线：Field = 关卡里的 3D 声音（摄像头的麦克风很差：看监控时变窄变闷）；
+## Robot = 机器人身上的声音，送进 Field（隔着墙时整条变闷）；World = 设施的底噪；
+## 操作台自己的声音（继电器、雪花、按键、传回、回声）直接走 Master。
 func _setup_audio() -> void:
-	_ensure_bus("Robot")
-	_ensure_bus("World")
-	var s := Sfx.build_all()
-	_add_player("motor", s["motor"], "Robot", -30.0)
-	_add_player("ambient", s["ambient"], "World", -14.0)
-	_add_player("static", s["static"], "Master", -80.0)
-	_add_player("click", s["click"], "Master", -4.0)
-	_add_player("beep", s["beep"], "Master", -10.0)
-	_add_player("buzz", s["buzz"], "Master", -8.0)
-	_add_player("door", s["door"], "World", -2.0)
-	_add_player("shutter", s["shutter"], "Robot", -6.0)
-	_add_player("charge", s["charge"], "Robot", -20.0)
-	_add_player("transmit", s["transmit"], "Master", -22.0)
-	_add_player("ping", s["ping"], "Master", -10.0)
-	_add_player("echo", s["echo"], "Master", -12.0)
-	for loop_name in ["motor", "ambient", "static"]:
+	_ensure_bus("Field", "Master", true)
+	_ensure_bus("Robot", "Field", false)
+	_ensure_bus("World", "Master", false)
+	for b in ["Field", "Robot", "World"]:
+		AudioServer.set_bus_mute(AudioServer.get_bus_index(b), false)  # 重开一局时复位
+	sfx = Sfx.build_all()
+	_add_player("ambient", sfx["ambient"], "World", -14.0)
+	_add_player("static", sfx["static"], "Master", -80.0)
+	_add_player("click", sfx["click"], "Master", -4.0)
+	_add_player("beep", sfx["beep"], "Master", -10.0)
+	_add_player("buzz", sfx["buzz"], "Master", -8.0)
+	_add_player("door", sfx["door"], "World", -2.0)
+	_add_player("transmit", sfx["transmit"], "Master", -22.0)
+	_add_player("echo", sfx["echo"], "Master", -12.0)
+	_add_player("bump_alarm", sfx["bump_alarm"], "Master", -14.0)
+	for loop_name in ["ambient", "static"]:
 		(players[loop_name] as AudioStreamPlayer).play()
 
 
-func _ensure_bus(bus_name: String) -> void:
+func _ensure_bus(bus_name: String, send: String, highpass: bool) -> void:
 	if AudioServer.get_bus_index(bus_name) != -1:
 		return
 	var idx := AudioServer.bus_count
 	AudioServer.add_bus(idx)
 	AudioServer.set_bus_name(idx, bus_name)
-	AudioServer.set_bus_send(idx, "Master")
+	AudioServer.set_bus_send(idx, send)
 	var lp := AudioEffectLowPassFilter.new()
 	lp.cutoff_hz = 20000.0
 	AudioServer.add_bus_effect(idx, lp)
+	if highpass:
+		var hp := AudioEffectHighPassFilter.new()
+		hp.cutoff_hz = 10.0
+		AudioServer.add_bus_effect(idx, hp)
 
 
 func _add_player(player_name: String, stream: AudioStream, bus: String, volume: float) -> void:
@@ -802,7 +969,7 @@ func _add_player(player_name: String, stream: AudioStream, bus: String, volume: 
 
 
 func _play(player_name: String, pitch := 1.0, volume_offset := 0.0) -> void:
-	var p: AudioStreamPlayer = players[player_name]
+	var p = players[player_name]  # AudioStreamPlayer 或 AudioStreamPlayer3D
 	if not p.has_meta("base_db"):
 		p.set_meta("base_db", p.volume_db)
 	p.pitch_scale = pitch
@@ -810,12 +977,14 @@ func _play(player_name: String, pitch := 1.0, volume_offset := 0.0) -> void:
 	p.play()
 
 
-## 机载：机器人声音贴耳、环境声小；监控：机器人声音变远变闷，环境声成为主体
+## 机载：机器人的麦克风，声音完整、贴耳；监控：摄像头的麦克风，又窄又闷，设施底噪成为主体。
+## 远近和左右由 3D 声音自己算（听者跟着画面走，见 _update_ear）。
 func _apply_audio_view(onboard: bool) -> void:
-	var r := AudioServer.get_bus_index("Robot")
+	var f := AudioServer.get_bus_index("Field")
 	var w := AudioServer.get_bus_index("World")
-	(AudioServer.get_bus_effect(r, 0) as AudioEffectLowPassFilter).cutoff_hz = 20000.0 if onboard else 600.0
-	AudioServer.set_bus_volume_db(r, 0.0 if onboard else -12.0)
+	(AudioServer.get_bus_effect(f, 0) as AudioEffectLowPassFilter).cutoff_hz = 20000.0 if onboard else 3200.0
+	(AudioServer.get_bus_effect(f, 1) as AudioEffectHighPassFilter).cutoff_hz = 10.0 if onboard else 260.0
+	AudioServer.set_bus_volume_db(f, 0.0 if onboard else -2.0)
 	(AudioServer.get_bus_effect(w, 0) as AudioEffectLowPassFilter).cutoff_hz = 2500.0 if onboard else 900.0
 	AudioServer.set_bus_volume_db(w, -6.0 if onboard else 0.0)
 
@@ -838,15 +1007,18 @@ func _run_autotest(dir: String) -> void:
 	await _shot(dir + "/01_onboard_start.png")
 
 	var z0 := robot.global_position.z
+	_start_peak_log("Robot")
 	Input.action_press("move_forward")
 	await _wait(1.5)
 	Input.action_release("move_forward")
+	_report_bump("机载（照片）时，Robot 总线")
 	print("AUTOTEST 正对货箱前进 1.5 秒，z 变化 = %.3f（应约 -0.82：顶到货箱停下）" % (robot.global_position.z - z0))
 	Input.action_press("turn_right")
 	await _wait(2.0)
 	Input.action_release("turn_right")
 	await _wait(0.4)
 	print("AUTOTEST 右转约 2.4 秒后 heading = %.1f°（应接近 90）" % -rad_to_deg(robot.rotation.y))
+	print("AUTOTEST 撞上货箱的声音材质：%s（应为 crate）" % last_bump)
 	await _shot(dir + "/01b_onboard_stale_photo.png")
 	await _sonar_now()
 	await _shot(dir + "/01c_sonar_loading.png")
@@ -891,6 +1063,10 @@ func _run_autotest(dir: String) -> void:
 	select_view("CAM-3")
 	await _wait(1.2)
 	await _shot(dir + "/09b_cam3_trail_hidden.png")
+	# 探照灯照在拖痕上，单色监控里也不该看出来
+	_place_robot(Vector3(22.35, 0.0, 3.6), 180.0)
+	await _wait(1.2)
+	await _shot(dir + "/09e_cam3_beam_on_trail.png")
 	select_view(ONBOARD)
 
 	_place_robot(Vector3(9.6, 0.0, 0.8), 90.0)
@@ -938,6 +1114,79 @@ func _run_autotest(dir: String) -> void:
 	await _wait(14.0)
 	print("AUTOTEST 人影走到摄像头下消失：%s（共 %d 步）" % [omen.done, omen.points.size()])
 
+	# 光：探照灯在监控里投出朝前的光斑，光斑跟着机器人转；在没有监控的走廊里对着门洞，光照进有监控的房间
+	select_view("CAM-1")
+	_place_robot(Vector3(3.75, 0.0, 3.75), 90.0)
+	await _wait(1.0)
+	await _shot(dir + "/16_cam1_beam_east.png")
+	_place_robot(Vector3(3.75, 0.0, 3.75), 180.0)
+	await _wait(1.0)
+	await _shot(dir + "/16b_cam1_beam_south.png")
+	_place_robot(Vector3(22.0, 0.0, 5.0), 0.0)
+	await _wait(1.0)
+	await _shot(dir + "/17a_cam1_exit_no_robot.png")
+	_place_robot(Vector3(9.8, 0.0, 0.8), 270.0)
+	await _wait(1.0)
+	await _shot(dir + "/17_cam1_beam_into_exit.png")
+	_place_robot(Vector3(22.0, 0.0, 5.0), 0.0)
+	select_view("CAM-2")
+	await _wait(1.0)
+	await _shot(dir + "/18a_cam2_door_no_robot.png")
+	_place_robot(Vector3(12.2, 0.0, 0.8), 180.0)
+	await _wait(1.0)
+	await _shot(dir + "/18_cam2_beam_into_door.png")
+	_place_robot(Vector3(12.2, 0.0, 0.8), 90.0)
+	await _wait(1.0)
+	await _shot(dir + "/18b_cam2_beam_along_corridor.png")
+	print("AUTOTEST 看 CAM-2 时听者在摄像头上：%s" % ear.global_position.is_equal_approx((built["cameras"]["CAM-2"]["camera"] as Camera3D).global_position))
+	print("AUTOTEST 机器人在墙后的走廊里，CAM-2 听它的遮挡 = %.2f（应接近 1）" % robot_occ)
+	_place_robot(Vector3(13.6, 0.0, 5.0), 0.0)
+	await _wait(1.0)
+	print("AUTOTEST 机器人在警卫室里，CAM-2 听它的遮挡 = %.2f（应接近 0）" % robot_occ)
+
+	# 闪光：看着监控拍照，监控里也闪一下
+	_place_robot(Vector3(3.75, 0.0, 6.0), 0.0)
+	select_view("CAM-1")
+	await _wait(1.0)
+	photo_cooldown = 0.0
+	_take_photo()
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+	await _shot(dir + "/19_cam1_flash.png")
+
+	# 撞击：看着监控时，从摄像头的位置也听得到；擦着墙走是轻撞 + 蹭墙声
+	_place_robot(Vector3(2.25, 0.0, 7.2), 0.0)
+	await _wait(0.5)
+	_start_peak_log("Field")
+	Input.action_press("move_forward")
+	await _wait(1.5)
+	Input.action_release("move_forward")
+	_report_bump("看 CAM-1 时，Field 总线")
+	select_view(ONBOARD)
+	_place_robot(Vector3(10.5, 0.0, 0.8), 75.0)
+	await _wait(0.3)
+	var max_scrape := 0.0
+	bump_time = -100.0
+	Input.action_press("move_forward")
+	for i in 150:
+		await get_tree().process_frame
+		max_scrape = maxf(max_scrape, robot.scrape)
+	Input.action_release("move_forward")
+	print("AUTOTEST 斜着擦北墙开：撞击力度 %.2f（应 < 0.4，擦边轻），蹭墙声最高 %.2f（应 > 0.5）" % [last_bump_strength if bump_time > 0.0 else -1.0, max_scrape])
+
+	# 声音：压过纸会沙沙响；机载时听者回到机器人身上
+	select_view(ONBOARD)
+	_place_robot(Vector3(12.8, 0.0, 3.5), 90.0)
+	await _wait(0.3)
+	rustle_count = 0
+	Input.action_press("move_forward")
+	await _wait(1.2)
+	var field_peak := AudioServer.get_bus_peak_volume_left_db(AudioServer.get_bus_index("Field"), 0)
+	await _wait(1.3)
+	Input.action_release("move_forward")
+	print("AUTOTEST 开过散落的纸，沙沙响 %d 次（应 ≥ 2）；Field 总线峰值 %.1f dB（应 > -60）" % [rustle_count, field_peak])
+	print("AUTOTEST 机载时听者在机器人身上：%s" % (ear.global_position.distance_to(robot.global_position) < 0.8))
+
 	await _topdown(dir + "/00_topdown.png")
 
 	select_view(ONBOARD, true)
@@ -946,6 +1195,30 @@ func _run_autotest(dir: String) -> void:
 	await _shot(dir + "/12_end.png")
 	print("AUTOTEST 完成")
 	get_tree().quit()
+
+
+func _start_peak_log(bus: String) -> void:
+	peak_log.clear()
+	peak_bus = AudioServer.get_bus_index(bus)
+	bump_time = -100.0
+
+
+## 撞击那一下（之后 0.3 秒）比撞之前 0.6 秒里电机声的峰值高多少
+func _report_bump(label: String) -> void:
+	peak_bus = -1
+	if bump_time < 0.0:
+		print("AUTOTEST %s：没有检测到撞击" % label)
+		return
+	var before := -200.0
+	var after := -200.0
+	for e in peak_log:
+		var t: float = e[0]
+		var db: float = e[1]
+		if t >= bump_time - 0.6 and t < bump_time - 0.05:
+			before = maxf(before, db)
+		elif t >= bump_time and t < bump_time + 0.3:
+			after = maxf(after, db)
+	print("AUTOTEST %s：撞前 %.1f dB → 撞击 %.1f dB（高出 %.1f dB，应 ≥ 6）力度 %.2f" % [label, before, after, after - before, last_bump_strength])
 
 
 ## 跳过冷却拍一张，等它传完

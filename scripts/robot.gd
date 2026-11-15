@@ -3,6 +3,11 @@ extends CharacterBody3D
 ## 机身在渲染层 2，机载照片不渲染这一层（照片里看不到机器人自己）。
 ## 机载相机不能实时回传：这里只有相机挂点和闪光，拍照由操作台用单独的 SubViewport 渲染一帧。
 ## 声呐：一次 ping 向前方 120° 扇形发出一排水平射线，回声点（角度、距离、强度）交给操作台的扇形屏。
+## 云台上一盏常亮的前向小探照灯（车体本身不发光）：照片里看不到它（拍照那一帧关掉，只有闪光），
+## 监控里看得到它在前方地面和墙上投出的光斑：光斑在哪、朝哪边，机器人就在哪、朝哪边。
+## 机器人被货箱挡住、或者在没有监控的地方对着门洞时，光从缝隙和门洞照进有监控的房间。
+## 撞到东西发出 bumped（表面材质、力度：按垂直撞进去的速度算，擦边就轻）；
+## 顶着东西开时 strain 升高（电机憋着叫）；贴着东西蹭着走时 scrape 升高。
 
 const FORWARD_SPEED := 1.1
 const BACK_SPEED := 0.6
@@ -20,6 +25,7 @@ const SONAR_HEIGHT := 0.3
 const SONAR_DROPOUT := 0.08  # 少量射线没有回声，轮廓更像声呐
 
 signal sonar_returned(echoes: PackedVector3Array)
+signal bumped(surface: String, strength: float)
 
 var speed := 0.0
 var turn_rate := 0.0
@@ -27,6 +33,10 @@ var input_enabled := true
 var odometer := 0.0
 var camera_mount: Node3D
 var flash: SpotLight3D
+var searchlight: SpotLight3D
+var strain := 0.0
+var scrape := 0.0
+var _was_touching := false
 var _sonar_pending := false
 var _rng := RandomNumberGenerator.new()
 
@@ -89,16 +99,35 @@ func _physics_process(delta: float) -> void:
 	rotate_y(turn_rate * delta)
 	var before := global_position
 	velocity = forward() * speed
+	var pre_velocity := velocity
 	move_and_slide()
 	global_position.y = 0.0
 	var moved := global_position.distance_to(before)
 	odometer += moved
+	var touching := get_slide_collision_count() > 0
+	var stuck := touching and moved < absf(speed) * delta * 0.5
+	if touching and not _was_touching:
+		var col := get_slide_collision(0)
+		var into := absf(pre_velocity.dot(col.get_normal()))
+		if into > 0.08:
+			bumped.emit(_surface_of(col.get_collider()), clampf(into / FORWARD_SPEED, 0.0, 1.0))
+	_was_touching = touching
+	strain = move_toward(strain, 1.0 if stuck and absf(drive) > 0.0 else 0.0, delta * 4.0)
+	var sliding := moved / delta / FORWARD_SPEED if touching and not stuck else 0.0
+	scrape = move_toward(scrape, clampf(sliding, 0.0, 1.0), delta * 6.0)
 	# 顶到东西：速度掉下来，下次松开再加速
-	if get_slide_collision_count() > 0 and moved < absf(speed) * delta * 0.5:
+	if stuck:
 		speed = move_toward(speed, 0.0, ACCEL * 2.0 * delta)
 	if _sonar_pending:
 		_sonar_pending = false
 		sonar_returned.emit(_sonar_scan())
+
+
+## 关卡搭建时给带碰撞的 CSG 标了 surface（concrete / crate / metal）
+static func _surface_of(collider: Object) -> String:
+	if collider != null and collider.has_meta("surface"):
+		return str(collider.get_meta("surface"))
+	return "concrete"
 
 
 ## 每个回声：x = 相对正前方的角度（右为正，弧度），y = 距离（米），z = 强度（正对表面强，擦过弱）
@@ -130,13 +159,14 @@ func _build_body() -> void:
 	_part(Vector3(-0.33, 0.10, 0.0), Vector3(0.12, 0.20, 0.82), dark)
 	_part(Vector3(0.0, 0.40, -0.24), Vector3(0.22, 0.14, 0.18), shell)      # 摄像头云台
 	_part(Vector3(0.0, 0.37, 0.28), Vector3(0.26, 0.10, 0.12), dark)        # 电缆卷盘
-	# 前方小灯：监控里靠它分辨机器人朝向
-	var lamp := StandardMaterial3D.new()
-	lamp.albedo_color = Color(0.3, 0.2, 0.05)
-	lamp.emission_enabled = true
-	lamp.emission = Color(1.0, 0.65, 0.2)
-	lamp.emission_energy_multiplier = 3.0
-	_part(Vector3(0.0, 0.34, -0.37), Vector3(0.10, 0.05, 0.02), lamp)
+	# 探照灯：云台顶上的小灯筒，只有前面的灯罩亮（不投影，免得挡住自己的光）
+	_part(Vector3(0.0, 0.52, -0.26), Vector3(0.11, 0.09, 0.16), dark).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var lens := StandardMaterial3D.new()
+	lens.albedo_color = Color(0.3, 0.25, 0.15)
+	lens.emission_enabled = true
+	lens.emission = Color(1.0, 0.85, 0.6)
+	lens.emission_energy_multiplier = 2.5
+	_part(Vector3(0.0, 0.52, -0.345), Vector3(0.08, 0.065, 0.01), lens).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
 func _build_onboard() -> void:
@@ -158,6 +188,19 @@ func _build_onboard() -> void:
 	flash.visible = false
 	add_child(flash)
 
+	# 探照灯：常亮，窄光束略朝下，前方一两米外的地面上一块长光斑，远处照上墙
+	searchlight = SpotLight3D.new()
+	searchlight.position = Vector3(0.0, 0.52, -0.36)
+	searchlight.rotation_degrees = Vector3(-9.0, 0.0, 0.0)
+	searchlight.spot_range = 7.0
+	searchlight.spot_angle = 17.0
+	searchlight.spot_angle_attenuation = 1.1
+	searchlight.spot_attenuation = 0.6
+	searchlight.light_energy = 7.0
+	searchlight.light_color = Color.WHITE  # 只在单色监控里看得到；有颜色会让拖痕和地面亮度不同
+	searchlight.shadow_enabled = true
+	add_child(searchlight)
+
 
 func _mat(color: Color) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
@@ -166,7 +209,7 @@ func _mat(color: Color) -> StandardMaterial3D:
 	return mat
 
 
-func _part(center: Vector3, size: Vector3, mat: Material) -> void:
+func _part(center: Vector3, size: Vector3, mat: Material) -> MeshInstance3D:
 	var mesh := BoxMesh.new()
 	mesh.size = size
 	var mi := MeshInstance3D.new()
@@ -175,3 +218,4 @@ func _part(center: Vector3, size: Vector3, mat: Material) -> void:
 	mi.position = center
 	mi.layers = BODY_LAYER
 	add_child(mi)
+	return mi

@@ -19,6 +19,17 @@ static func build_all() -> Dictionary:
 		"transmit": transmit(),
 		"ping": sonar_ping(),
 		"echo": sonar_echo(),
+		"vent": vent_loop(),
+		"lamp_hum": buzz_loop(),
+		"console": console_loop(),
+		"elevator": elevator_loop(),
+		# 墙：钝、碎；货箱：空、木头的敲击声；金属：叮
+		"thud_concrete": impact([[190.0, 0.45, 30.0], [330.0, 0.35, 45.0], [610.0, 0.15, 60.0]], 1.4, 0.55, 21),
+		"thud_crate": impact([[240.0, 0.5, 26.0], [520.0, 0.4, 34.0], [890.0, 0.22, 48.0]], 0.7, 0.3, 23),
+		"thud_metal": clang(),
+		"scrape": scrape_loop(),
+		"bump_alarm": bump_alarm(),
+		"rustle": rustle(),
 	}
 
 
@@ -221,4 +232,164 @@ static func sonar_echo() -> AudioStreamWAV:
 		phase += TAU * 1080.0 / RATE
 		var env := minf(1.0, t / 0.02) * exp(-t * 11.0)
 		s[i] = sin(phase) * 0.3 * env * (0.85 + 0.15 * sin(TAU * 31.0 * t))
+	return _wav(s)
+
+
+
+# ---------------------------------------------------------------- 声音地标（循环，挂在关卡里的 3D 声源上）
+
+## 通风口：低沉的风声，叶片每秒转 7 下带出一点起伏
+static func vent_loop() -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 31
+	var length := 2.0
+	var s := _buffer(length)
+	var lp := 0.0
+	var lp2 := 0.0
+	for i in s.size():
+		var t := float(i) / RATE
+		lp += 0.08 * (rng.randf_range(-1.0, 1.0) - lp)
+		lp2 += 0.08 * (lp - lp2)
+		var blade := 0.75 + 0.25 * sin(TAU * 7.0 * t)
+		s[i] = lp2 * 3.2 * blade + sin(TAU * 98.0 * t) * 0.05
+	return _wav(s, true)
+
+
+## 台灯电流声：100 Hz 的嗡和高次谐波，偶尔噼啪一下
+static func buzz_loop() -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 37
+	var s := _buffer(1.0)
+	for i in s.size():
+		var t := float(i) / RATE
+		var saw := fmod(t * 100.0, 1.0) * 2.0 - 1.0
+		var v := saw * 0.16 + sin(TAU * 200.0 * t) * 0.08 + sin(TAU * 300.0 * t) * 0.04
+		if rng.randf() < 0.0015:
+			v += rng.randf_range(-0.6, 0.6)
+		s[i] = v
+	return _wav(s, true)
+
+
+## 控制台：不规律的继电器咔哒，每 1.5 秒一声短提示音，底下一层变压器嗡声
+static func console_loop() -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 41
+	var length := 3.0
+	var s := _buffer(length)
+	var ticks := [0.21, 0.37, 0.9, 1.33, 1.41, 2.05, 2.62]
+	for i in s.size():
+		var t := float(i) / RATE
+		var v := sin(TAU * 50.0 * t) * 0.05 + sin(TAU * 150.0 * t) * 0.02
+		for tk in ticks:
+			var dt: float = t - float(tk)
+			if dt >= 0.0 and dt < 0.03:
+				v += rng.randf_range(-1.0, 1.0) * exp(-dt * 600.0) * 0.5
+		var bt := fmod(t, 1.5)
+		if bt < 0.08:
+			v += sin(TAU * 1800.0 * t) * 0.12 * minf(1.0, bt / 0.005) * clampf((0.08 - bt) / 0.01, 0.0, 1.0)
+		s[i] = v
+	return _wav(s, true)
+
+
+## 电梯：很低的电机嗡鸣，两个相近的频率慢慢拍
+static func elevator_loop() -> AudioStreamWAV:
+	var length := 4.0
+	var s := _buffer(length)
+	for i in s.size():
+		var t := float(i) / RATE
+		s[i] = sin(TAU * 55.0 * t) * 0.25 + sin(TAU * 55.5 * t) * 0.2 + sin(TAU * 110.0 * t) * 0.06
+	return _wav(s, true)
+
+
+# ---------------------------------------------------------------- 机器人碰撞与地面
+
+## 撞击：几个衰减很快的共振 + 一下宽频的碰撞噪声 + 机身自己的金属颤响。
+## 要在笔记本扬声器和监控的窄麦克风（约 260～3200 Hz）里都听得清，所以主要能量放在中频。
+## modes：[[频率, 幅度, 衰减], ...]；noise：碰撞噪声的量；grit：低通系数，越小越闷
+static func impact(modes: Array, noise: float, grit: float, seed_value: int) -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value
+	var s := _buffer(0.5)
+	var lp := 0.0
+	var lp_slow := 0.0
+	var rattle := [[1340.0, 0.10, 22.0], [2215.0, 0.07, 28.0], [3120.0, 0.04, 35.0]]
+	for i in s.size():
+		var t := float(i) / RATE
+		var v := 0.0
+		for m in modes:
+			var f: float = float(m[0]) * (1.0 - 0.15 * minf(t * 8.0, 1.0))  # 撞上的一瞬间音高略往下掉
+			v += sin(TAU * f * t) * float(m[1]) * exp(-t * float(m[2]))
+		lp += grit * (rng.randf_range(-1.0, 1.0) - lp)
+		lp_slow += 0.02 * (lp - lp_slow)
+		v += (lp - lp_slow) * noise * exp(-t * 55.0)
+		# 机身颤响：开头稍晚一点、有点抖
+		var tr := maxf(t - 0.008, 0.0)
+		for m in rattle:
+			v += sin(TAU * float(m[0]) * tr) * float(m[1]) * exp(-tr * float(m[2])) * (0.7 + 0.3 * sin(TAU * 37.0 * tr))
+		s[i] = v * minf(1.0, t / 0.0015)
+	return _wav(s)
+
+
+## 贴着墙蹭过去：粗糙的摩擦噪声，颗粒不规则，1.5 秒无缝循环
+static func scrape_loop() -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 47
+	var length := 1.5
+	var s := _buffer(length)
+	var lp := 0.0
+	var lp_slow := 0.0
+	var grain := 0.5
+	for i in s.size():
+		var t := float(i) / RATE
+		if rng.randf() < 0.004:
+			grain = rng.randf_range(0.3, 1.0)
+		lp += 0.35 * (rng.randf_range(-1.0, 1.0) - lp)
+		lp_slow += 0.03 * (lp - lp_slow)
+		var edge := minf(t / 0.05, 1.0) * minf((length - t) / 0.05, 1.0)  # 首尾淡入淡出，循环接缝不爆
+		s[i] = (lp - lp_slow) * 0.9 * grain * (0.75 + 0.25 * sin(TAU * 9.0 * t)) * (0.5 + 0.5 * edge)
+	return _wav(s, true)
+
+
+## 操作台上的碰撞传感器：保险杠一碰，蜂鸣器短短响一下（看哪路画面都听得到）
+static func bump_alarm() -> AudioStreamWAV:
+	var s := _buffer(0.11)
+	for i in s.size():
+		var t := float(i) / RATE
+		var env := minf(1.0, t / 0.003) * clampf((0.11 - t) / 0.02, 0.0, 1.0)
+		var sq := 1.0 if sin(TAU * 520.0 * t) > 0.0 else -1.0
+		s[i] = (sq * 0.18 + sin(TAU * 1040.0 * t) * 0.08) * env
+	return _wav(s)
+
+
+## 撞到金属（门、控制台）：几个不成谐波的频率叮一声
+static func clang() -> AudioStreamWAV:
+	var s := _buffer(0.9)
+	var partials := [[410.0, 0.5, 6.0], [1037.0, 0.3, 9.0], [1781.0, 0.18, 12.0], [2650.0, 0.1, 16.0]]
+	for i in s.size():
+		var t := float(i) / RATE
+		var v := sin(TAU * 90.0 * t) * exp(-t * 30.0) * 0.5
+		for pt in partials:
+			v += sin(TAU * float(pt[0]) * t) * float(pt[1]) * exp(-t * float(pt[2]))
+		s[i] = v * 0.6
+	return _wav(s)
+
+
+## 履带压过纸：几下细碎的沙沙声
+static func rustle() -> AudioStreamWAV:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 43
+	var s := _buffer(0.45)
+	var hp_prev := 0.0
+	var bursts := [0.0, 0.07, 0.16, 0.22, 0.31]
+	for i in s.size():
+		var t := float(i) / RATE
+		var n := rng.randf_range(-1.0, 1.0)
+		var hp := n - hp_prev
+		hp_prev = n
+		var env := 0.0
+		for b in bursts:
+			var dt: float = t - float(b)
+			if dt >= 0.0:
+				env += exp(-dt * 40.0) * (0.6 + 0.4 * rng.randf())
+		s[i] = hp * 0.25 * minf(env, 1.2)
 	return _wav(s)
