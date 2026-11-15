@@ -4,7 +4,8 @@ extends CharacterBody3D
 ## 机载相机不能实时回传：这里只有相机挂点和闪光，拍照由操作台用单独的 SubViewport 渲染一帧。
 ## 声呐：一次 ping 向前方 120° 扇形发出一排水平射线，回声点（角度、距离、强度）交给操作台的扇形屏。
 ## 云台上一盏常亮的前向小探照灯（车体本身不发光）：照片里看不到它（拍照那一帧关掉，只有闪光），
-## 监控里看得到它在前方地面和墙上投出的光斑：光斑在哪、朝哪边，机器人就在哪、朝哪边。
+## 监控里看得到空气里的光柱和它在前方地面、墙上投出的光斑：光柱从哪出来、朝哪边，机器人就在哪、朝哪边
+## （监控画面里没有朝向箭头，这是看出机器人朝向的主要办法）。
 ## 机器人被货箱挡住、或者在没有监控的地方对着门洞时，光从缝隙和门洞照进有监控的房间。
 ## 撞到东西发出 bumped（表面材质、力度：按垂直撞进去的速度算，擦边就轻）；
 ## 顶着东西开时 strain 升高（电机憋着叫）；贴着东西蹭着走时 scrape 升高。
@@ -15,6 +16,7 @@ const TURN_SPEED := 0.785398  # 45°/秒
 const ACCEL := 3.0
 const TURN_ACCEL := 4.0
 const ModelFit := preload("res://scripts/model_fit.gd")
+const Searchlight := preload("res://scripts/searchlight.gd")
 const MODEL := "res://assets/models/robot.glb"  # 资产工作台做的外观；没有时用方块
 const MODEL_TURN := Vector3(0.0, 180.0, 0.0)  # 模型车头朝 +z，转到 -z
 # 模型（约 0.66 × 0.8 × 0.8 米）上的位置：摄像头镜头、云台顶上探照灯的灯头
@@ -39,7 +41,7 @@ var input_enabled := true
 var odometer := 0.0
 var camera_mount: Node3D
 var flash: SpotLight3D
-var searchlight: SpotLight3D
+var searchlight: Searchlight
 var strain := 0.0
 var scrape := 0.0
 var _was_touching := false
@@ -207,16 +209,11 @@ func _build_onboard() -> void:
 	add_child(flash)
 
 	# 探照灯：常亮，窄光束略朝下，前方一两米外的地面上一块长光斑，远处照上墙
-	searchlight = SpotLight3D.new()
+	# 光柱、眩光、溢光、反射光都在 searchlight.gd 里
+	searchlight = Searchlight.new()
 	searchlight.position = MODEL_LAMP + Vector3(0.0, 0.0, -0.02) if _has_model else Vector3(0.0, 0.52, -0.36)
 	searchlight.rotation_degrees = Vector3(-12.0 if _has_model else -9.0, 0.0, 0.0)  # 灯装得越高越往下压，光斑中心仍在三米多外
-	searchlight.spot_range = 7.0
-	searchlight.spot_angle = 17.0
-	searchlight.spot_angle_attenuation = 1.1
-	searchlight.spot_attenuation = 0.6
-	searchlight.light_energy = 7.0
-	searchlight.light_color = Color.WHITE  # 只在单色监控里看得到；有颜色会让拖痕和地面亮度不同
-	searchlight.shadow_enabled = true
+	searchlight.build(BODY_LAYER)
 	add_child(searchlight)
 
 

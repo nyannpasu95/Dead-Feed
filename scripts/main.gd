@@ -302,15 +302,13 @@ func _camera_with_key(k: int) -> String:
 
 
 func _capture_monitor_frame() -> void:
-	var cam: Dictionary = built["cameras"][view]
 	for s in built["skippers"]:
 		s.on_frame(view)
-	var in_room := _robot_in_rooms(cam["reveals"])
-	overlay.update_hud(cam["camera"], robot, view, _timestamp(), Vector2(viewport.size), in_room)
+	overlay.update_hud(view, _timestamp(), Vector2(viewport.size))
 	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
-## 朝向箭头只在机器人位于这路摄像头负责的房间里时出现，不会隔墙显示
+## 机器人是否在这路摄像头负责的房间里
 func _robot_in_rooms(room_ids: Array) -> bool:
 	var p := Vector2(robot.global_position.x, robot.global_position.z)
 	for room_id in room_ids:
